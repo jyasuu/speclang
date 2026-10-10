@@ -1,0 +1,84 @@
+# Todo spec, part 04: cross-cutting concerns. Mirrors spec sections 15 (frontend rules) and 17 to 22.
+
+rules:
+  # 15 Frontend rules
+  - { id: FE-1, area: frontend, text: "Code is organized by feature (auth, tasks, lists, settings) with a shared design-system package and an API client generated from OpenAPI." }
+  - { id: FE-2, area: frontend, text: "Server state lives in a query cache backed by the local store; UI-only state lives in a small store; server data is not duplicated in global stores." }
+  - { id: FE-3, area: frontend, text: "The URL reflects list, filter and selected task so views are linkable and back and forward work." }
+  - { id: FE-4, area: frontend, text: "Complete and delete are optimistic with an undo toast; no destructive action lacks undo or confirmation.", supports: [FR-12, FR-13] }
+  - { id: FE-5, area: frontend, text: "Accessibility: semantic HTML, visible focus, live region for toasts, keyboard alternative for drag and drop, contrast of at least 4.5:1, reduced-motion support.", supports: [NFR-8] }
+  - { id: FE-6, area: frontend, text: "Performance: route-level code splitting, virtualized lists above 100 items, initial route bundle of at most 200 KB gzipped.", supports: [NFR-3] }
+  - { id: FE-7, area: frontend, text: "PWA: service worker with stale-while-revalidate for assets, background sync for the outbox, installable manifest.", supports: [FR-50] }
+  - { id: FE-8, area: frontend, text: "Strict Content Security Policy, no inline scripts, sanitized Markdown output, and tokens never stored in localStorage.", supports: [NFR-6] }
+  # 17 Security controls
+  - { id: SEC-1, area: security, text: "Passwords are hashed with Argon2id (64 MB memory, 3 iterations); an account locks with progressive delay after 5 failed attempts; refresh-token reuse revokes the whole token family.", supports: [FR-1, FR-5, NFR-6] }
+  - { id: SEC-2, area: security, text: "Transport uses HSTS and TLS 1.2+, with secure SameSite=Lax cookies.", supports: [NFR-6] }
+  - { id: SEC-3, area: security, text: "Queries are parameterized; cookie-authenticated routes have CSRF protection; Markdown is sanitized; uploads are validated by content sniffing.", supports: [NFR-6] }
+  - { id: SEC-4, area: security, text: "Keys live in a managed KMS with envelope encryption for MFA secrets and rotation at least annually.", supports: [FR-4, NFR-6] }
+  - { id: SEC-5, area: security, text: "Supply chain: lockfiles, dependency scanning, SBOM, signed container images and minimal base images.", supports: [NFR-6] }
+  - { id: SEC-6, area: security, text: "Infrastructure: database and cache in private subnets, least-privilege IAM, no public database endpoints, default-deny security groups.", supports: [NFR-6] }
+  # 18 Privacy and compliance
+  - { id: PRV-1, area: privacy, text: "A data inventory documents every personal data field with its purpose and retention.", supports: [NFR-7] }
+  - { id: PRV-2, area: privacy, text: "The lawful basis is contract for the core service and consent for marketing.", supports: [FR-62] }
+  - { id: PRV-3, area: privacy, text: "Access, export, correction and deletion are self-service.", supports: [FR-60, FR-61] }
+  - { id: PRV-4, area: privacy, text: "Subprocessors are listed publicly and covered by data processing agreements.", supports: [NFR-7] }
+  - { id: PRV-5, area: privacy, text: "Staff may open task content only through a logged, time-boxed, user-approved support session.", supports: [NFR-7] }
+  - { id: PRV-6, area: privacy, text: "Breach response covers detection, triage and regulator notification within 72 hours.", supports: [NFR-7] }
+  # 19 Notification rules
+  - { id: NTR-1, area: notifications, text: "Each notification type and channel can be opted out of in settings, except security emails.", supports: [FR-43] }
+  - { id: NTR-2, area: notifications, text: "Quiet hours default to 22:00 to 07:00 local time and the digest defaults to off.", supports: [FR-42] }
+  - { id: NTR-3, area: notifications, text: "Templates are localized with a plain-text alternative and put no task content in email subject lines." }
+  - { id: NTR-4, area: notifications, text: "Every email has a one-click unsubscribe header and footer link.", supports: [FR-43] }
+  - { id: NTR-5, area: notifications, text: "Delivery is tracked as queued, sent, delivered, failed or bounced; a hard bounce disables that address." }
+  - { id: NTR-6, area: notifications, text: "A channel is retried up to 3 times over 15 minutes, then the failure is logged and the fallback channel is tried.", supports: [FR-41] }
+  # 20 Analytics principles
+  - { id: ANA-1, area: analytics, text: "Collect the minimum needed; task titles, descriptions and comment text never leave the system." }
+  - { id: ANA-2, area: analytics, text: "Analytics are opt-out, respect Do Not Track, and use pseudonymous user IDs." }
+  - { id: ANA-3, area: analytics, text: "Event names are object_action in snake case and past tense; every event carries event_id, timestamp, user_id_hash, platform, app_version and session_id." }
+  # 21 Mobile
+  - { id: MOB-1, area: mobile, text: "Ask for push permission only after the first reminder is created, with an in-app explanation first; if denied, show a dismissible banner and fall back to email.", supports: [FR-41] }
+  - { id: MOB-2, area: mobile, text: "Use platform background tasks, assume execution is not guaranteed, and always sync on app foreground.", supports: [FR-50] }
+  - { id: MOB-3, area: mobile, text: "Local SQLite storage is encrypted at rest with a key in the platform keystore, and the outbox survives app kill and OS restart.", supports: [FR-50] }
+  - { id: MOB-4, area: mobile, text: "Offer an optional app lock with Face ID, Touch ID or fingerprint." }
+  - { id: MOB-5, area: mobile, text: "Support universal links to lists and tasks, a share extension to add tasks from other apps, and a read-only Today widget." }
+  - { id: MOB-6, area: mobile, text: "Privacy labels and data-safety forms match the privacy section, and account deletion is available in-app as store rules require.", supports: [FR-61] }
+  - { id: MOB-7, area: mobile, text: "A server flag enforces the minimum app version; older clients see an upgrade prompt and the API supports the last 2 major client versions." }
+  - { id: MOB-8, area: mobile, text: "Respect low-data mode; upload attachments on Wi-Fi only if the user chooses." }
+  # 22 Admin and support
+  - { id: ADM-1, area: admin, text: "Staff access is role-based (support, engineer, security) and every access is logged to audit events." }
+  - { id: ADM-2, area: admin, text: "Support sees account metadata (email, plan, created date, sessions, sync status) but not task content, unless the user starts a 24-hour logged support session.", supports: [NFR-7] }
+  - { id: ADM-3, area: admin, text: "Support actions: resend verification, force logout, lock or unlock an account, trigger a data export, process a deletion, view job and notification failures." }
+  - { id: ADM-4, area: admin, text: "Abuse tooling covers rate-limit overrides, invite spam flags and attachment quarantine review." }
+
+threats:
+  - { id: TH-1, category: Spoofing, example: "Credential stuffing", mitigation: "Breached-password check, rate limiting, MFA and anomaly alerts", test: T-7 }
+  - { id: TH-2, category: Tampering, example: "Modified request IDs", mitigation: "Server-side authorization on every resource and version checks", test: T-2 }
+  - { id: TH-3, category: Repudiation, example: "Disputed shared-list change", mitigation: "Immutable change log and audit events", test: T-2 }
+  - { id: TH-4, category: Information disclosure, example: "Cross-tenant access through guessed IDs", mitigation: "Central policy checks, row-level security and automated authorization tests", test: T-2 }
+  - { id: TH-5, category: Denial of service, example: "Request floods and huge payloads", mitigation: "WAF, rate limits, payload size caps and autoscaling", test: T-6 }
+  - { id: TH-6, category: Elevation of privilege, example: "A Viewer edits a list", mitigation: "Role checks in the policy module, tested per endpoint", test: T-2 }
+
+notifications:
+  - { id: NT-1, type: Reminder, trigger: "Reminder time reached", channels: [push, email], rules: "One per reminder; skipped if the task is done; deferred until quiet hours end", opt_out: true, supports: [FR-40, FR-41, FR-42] }
+  - { id: NT-2, type: Assignment, trigger: "Task assigned to a user other than the actor", channels: [push, in-app, email], rules: "Batched if more than 5 in 10 minutes", opt_out: true, supports: [FR-31] }
+  - { id: NT-3, type: Invitation, trigger: "Member invited to a list", channels: [email], rules: "Link expires in 7 days; at most 20 pending invitations per list", opt_out: true, supports: [FR-30] }
+  - { id: NT-4, type: Comment mention, trigger: "A user is mentioned in a comment", channels: [push, in-app], rules: "Never sent to the author", opt_out: true, supports: [FR-32] }
+  - { id: NT-5, type: Daily digest, trigger: "User-chosen time", channels: [email], rules: "Sent only if something is due or overdue", opt_out: true, supports: [FR-42] }
+  - { id: NT-6, type: Security, trigger: "New login, password change or MFA change", channels: [email], rules: "Always sent and cannot be disabled", opt_out: false }
+
+analytics:
+  - { event: account_created, properties: [method], purpose: Funnel }
+  - { event: task_created, properties: [source, has_due_date, has_reminder], purpose: Engagement }
+  - { event: task_completed, properties: [days_to_complete_bucket, recurring], purpose: Engagement }
+  - { event: list_shared, properties: [role_granted, member_count_bucket], purpose: Collaboration }
+  - { event: reminder_delivered, properties: [channel, delay_seconds_bucket], purpose: Reliability }
+  - { event: sync_conflict_resolved, properties: [field, resolution], purpose: Sync quality }
+  - { event: search_performed, properties: [result_count_bucket], purpose: Search quality }
+  - { event: offline_session, properties: [duration_bucket, queued_changes_bucket], purpose: Offline usage }
+
+plans:
+  - { limit: Lists, free: "10", pro: Unlimited }
+  - { limit: Members per shared list, free: "5", pro: "100" }
+  - { limit: Attachments, free: "5 MB each and 100 MB total", pro: "10 MB each and 10 GB total" }
+  - { limit: Active reminders per task, free: "5", pro: "20" }
+  - { limit: History retention, free: "30 days", pro: "1 year" }

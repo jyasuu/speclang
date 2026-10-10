@@ -1,0 +1,274 @@
+# Todo spec, part 02: system design. Mirrors spec sections 7 to 12.
+
+entities:
+  - name: User
+    owner: identity
+    fields:
+      - { name: id, type: uuid, required: true }
+      - { name: email, type: string, required: true }
+      - { name: email_verified_at, type: timestamp }
+      - { name: password_hash, type: string }
+      - { name: display_name, type: string }
+      - { name: time_zone, type: string }
+      - { name: locale, type: string }
+      - { name: mfa_secret_enc, type: bytes }
+      - { name: marketing_consent_at, type: timestamp, note: "separate from account creation (FR-62)" }
+      - { name: deleted_at, type: timestamp }
+    retention: "Personal data erased within 30 days of an account deletion request; backups within 90 days."
+
+  - name: Identity
+    owner: identity
+    fields:
+      - { name: id, type: uuid, required: true }
+      - { name: user_id, type: uuid, required: true }
+      - { name: provider, type: string, required: true }
+      - { name: provider_subject, type: string, required: true }
+
+  - name: Session
+    owner: identity
+    fields:
+      - { name: id, type: uuid, required: true }
+      - { name: user_id, type: uuid, required: true }
+      - { name: refresh_token_hash, type: string, required: true }
+      - { name: device_label, type: string }
+      - { name: last_seen_at, type: timestamp }
+      - { name: revoked_at, type: timestamp }
+
+  - name: List
+    owner: lists
+    fields:
+      - { name: id, type: uuid, required: true }
+      - { name: owner_id, type: uuid, required: true }
+      - { name: name, type: string, required: true }
+      - { name: is_default, type: boolean, note: "the Inbox cannot be deleted" }
+      - { name: sort_key, type: string }
+      - { name: archived_at, type: timestamp }
+      - { name: version, type: integer, required: true }
+      - { name: deleted_at, type: timestamp }
+    retention: "Soft-deleted lists are purged after 30 days."
+
+  - name: ListMember
+    owner: sharing
+    fields:
+      - { name: list_id, type: uuid, required: true }
+      - { name: user_id, type: uuid, required: true }
+      - { name: role, type: "owner | editor | viewer", required: true }
+      - { name: invited_by, type: uuid }
+      - { name: invitation_token_hash, type: string, note: "invitation link valid 7 days" }
+      - { name: accepted_at, type: timestamp, note: "null while the invitation is pending" }
+      - { name: version, type: integer, required: true }
+
+  - name: Task
+    owner: tasks
+    fields:
+      - { name: id, type: uuid, required: true, note: "client-generated UUIDv7" }
+      - { name: list_id, type: uuid, required: true }
+      - { name: parent_id, type: uuid, note: "one level of subtasks" }
+      - { name: title, type: "string[1..500]", required: true }
+      - { name: description, type: "markdown[0..10000]" }
+      - { name: status, type: "open | done", required: true }
+      - { name: priority, type: "none | low | medium | high" }
+      - { name: due_at, type: timestamp }
+      - { name: completed_at, type: timestamp }
+      - { name: recurrence_rule, type: string }
+      - { name: sort_key, type: string, note: "fractional index" }
+      - { name: assignee_id, type: uuid }
+      - { name: version, type: integer, required: true }
+      - { name: deleted_at, type: timestamp, note: "tombstone for soft delete" }
+    states:
+      values: [open, done, deleted]
+      initial: open
+      transitions:
+        - { from: open,    to: done,    event: complete, by: [Editor, Owner] }
+        - { from: done,    to: open,    event: reopen,   by: [Editor, Owner] }
+        - { from: open,    to: deleted, event: delete,   by: [Editor, Owner] }
+        - { from: done,    to: deleted, event: delete,   by: [Editor, Owner] }
+        - { from: deleted, to: open,    event: restore,  by: [Editor, Owner] }
+    retention: "Soft-deleted tasks are purged after 30 days."
+
+  - name: Tag
+    owner: tasks
+    fields:
+      - { name: id, type: uuid, required: true }
+      - { name: owner_id, type: uuid, required: true }
+      - { name: name, type: string, required: true }
+
+  - name: TaskTag
+    owner: tasks
+    fields:
+      - { name: task_id, type: uuid, required: true }
+      - { name: tag_id, type: uuid, required: true }
+
+  - name: Reminder
+    owner: notifications
+    fields:
+      - { name: id, type: uuid, required: true }
+      - { name: task_id, type: uuid, required: true }
+      - { name: user_id, type: uuid, required: true }
+      - { name: remind_at, type: timestamp, required: true }
+      - { name: channel, type: "push | email" }
+      - { name: sent_at, type: timestamp }
+      - { name: status, type: "pending | sent | cancelled", required: true }
+
+  - name: Comment
+    owner: tasks
+    fields:
+      - { name: id, type: uuid, required: true }
+      - { name: task_id, type: uuid, required: true }
+      - { name: author_id, type: uuid, required: true }
+      - { name: body, type: string, required: true }
+      - { name: deleted_at, type: timestamp }
+    retention: "Soft-deleted with the task; anonymized when the author deletes their account."
+
+  - name: Attachment
+    owner: tasks
+    fields:
+      - { name: id, type: uuid, required: true }
+      - { name: task_id, type: uuid, required: true }
+      - { name: object_key, type: string, required: true }
+      - { name: filename, type: string }
+      - { name: size_bytes, type: bigint }
+      - { name: content_type, type: string }
+      - { name: scan_status, type: "pending | clean | quarantined", required: true }
+
+  - name: ChangeLog
+    owner: sync
+    fields:
+      - { name: seq, type: bigint, required: true }
+      - { name: list_id, type: uuid }
+      - { name: entity_type, type: string, required: true }
+      - { name: entity_id, type: uuid }
+      - { name: op, type: string, required: true }
+      - { name: payload, type: json }
+      - { name: actor_id, type: uuid }
+    retention: "Append-only; compacted after 90 days."
+
+  - name: AuditEvent
+    owner: security
+    fields:
+      - { name: id, type: uuid, required: true }
+      - { name: actor_id, type: uuid }
+      - { name: action, type: string, required: true }
+      - { name: target, type: string }
+      - { name: ip, type: string }
+    retention: "Kept 13 months."
+
+  # Found missing from the prose data model when the operations were written (see v0.1 notes)
+  - name: NotificationPreference
+    owner: notifications
+    fields:
+      - { name: user_id, type: uuid, required: true }
+      - { name: type, type: string, required: true }
+      - { name: channel, type: "push | email | in-app", required: true }
+      - { name: enabled, type: boolean, required: true }
+      - { name: quiet_hours, type: string }
+      - { name: digest_time, type: string }
+    notes: "Required by FR-42 and FR-43; not in the original data model section."
+
+  - name: ExportJob
+    owner: privacy
+    fields:
+      - { name: id, type: uuid, required: true }
+      - { name: user_id, type: uuid, required: true }
+      - { name: status, type: "queued | ready | expired", required: true }
+      - { name: object_key, type: string }
+      - { name: expires_at, type: timestamp }
+    notes: "Required by FR-60; not in the original data model section."
+
+decisions:
+  - id: ADR-001
+    title: Modular monolith
+    status: accepted
+    date: "2026-10-09"
+    context: "Team and scale (20k daily users) do not justify the operational cost of microservices."
+    decision: "Deploy one backend service with clean internal module boundaries (identity, tasks, lists, sharing, notifications, sync)."
+    alternatives: [Microservices, Serverless]
+    consequences:
+      - Lowest operational cost at target scale
+      - Needs lint rules to protect module boundaries
+  - id: ADR-002
+    title: PostgreSQL as the only primary datastore
+    status: accepted
+    date: "2026-10-09"
+    context: "The domain is relational and needs transactions, full-text search and JSON fields."
+    decision: "Use PostgreSQL for all primary data, including full-text search in v1."
+    alternatives: [Elasticsearch or OpenSearch for search, Document database]
+    consequences:
+      - Relational integrity and one less system
+      - Search may need extraction past about 10 million tasks
+  - id: ADR-003
+    title: Field-level last-writer-wins for offline sync
+    status: accepted
+    date: "2026-10-09"
+    context: "Clients edit offline on several devices; concurrent co-editing of one text field is a non-goal."
+    decision: "Resolve conflicts per field using a server-assigned logical clock; delete beats edit; keep the overridden value in history."
+    alternatives: [CRDTs, Operational transform]
+    consequences:
+      - Simple and predictable
+      - Not suitable for concurrent text co-editing
+      - Needs a history view for overridden values
+  - id: ADR-004
+    title: Client-generated UUIDv7 identifiers
+    status: accepted
+    date: "2026-10-09"
+    context: "Tasks must be creatable offline without ID collisions."
+    decision: "Use UUIDv7 for all primary keys, generated by the client or server."
+    alternatives: [Auto-increment integers]
+    consequences:
+      - Offline creation works without coordination
+      - Larger indexes than integers
+  - id: ADR-005
+    title: Short-lived JWT with rotating refresh token
+    status: accepted
+    date: "2026-10-09"
+    context: "The API should check access statelessly while limiting the damage of a stolen token."
+    decision: "15-minute access JWT plus a rotating refresh token in an httpOnly cookie, with reuse detection."
+    alternatives: [Server-side sessions only]
+    consequences:
+      - Stateless access checks
+      - Needs reuse-detection logic that revokes the token family
+  - id: ADR-006
+    title: Soft delete with tombstones
+    status: accepted
+    date: "2026-10-09"
+    context: "Deletions must reach offline devices and be recoverable for 30 days."
+    decision: "Mark rows with deleted_at and purge them after 30 days."
+    alternatives: [Hard delete]
+    consequences:
+      - Requires a purge job
+      - Every query must filter deleted rows
+  - id: ADR-007
+    title: React Native for mobile
+    status: accepted
+    date: "2026-10-09"
+    context: "Web and mobile should share domain and sync code and team skills."
+    decision: "Build mobile apps with React Native and Expo."
+    alternatives: [Separate native apps]
+    consequences:
+      - Shared code and skills with the web app
+      - Some native features need bridges
+
+rules:
+  # 7 Architecture and 9 Data model
+  - { id: DM-1, area: data, text: "All primary keys are UUIDv7 and all timestamps are UTC; all-day due dates use a separate flag and the user's time zone." }
+  - { id: DM-2, area: data, text: "Foreign keys are enforced; status and priority are constrained to fixed values." }
+  - { id: DM-3, area: data, text: "Ordering uses fractional indexing strings so reordering touches one row." }
+  - { id: DM-4, area: data, text: "Row-level authorization is enforced in the service layer and backed by Postgres row-level security as defense in depth.", supports: [NFR-6] }
+  - { id: DM-5, area: data, text: "Soft-deleted rows are purged after 30 days; change log is compacted after 90 days; audit events are kept 13 months; backups are encrypted and kept 35 days.", supports: [FR-13] }
+  # 10 Backend service design
+  - { id: BE-1, area: backend, text: "Code is layered as controller, service and repository; domain logic is framework-free and unit-testable." }
+  - { id: BE-2, area: backend, text: "Schema validation at every boundary; unknown fields are rejected." }
+  - { id: BE-3, area: backend, text: "One central policy module decides whether a user may perform an action on a resource; controllers contain no ad-hoc role checks.", supports: [NFR-6] }
+  - { id: BE-4, area: backend, text: "Each command is a single database transaction and the change-log append is part of the same transaction." }
+  - { id: BE-5, area: backend, text: "The reminder scheduler scans due reminders every minute with FOR UPDATE SKIP LOCKED; jobs are idempotent, retried 5 times with backoff, then dead-lettered with an alert.", supports: [FR-40] }
+  - { id: BE-6, area: backend, text: "Attachments upload directly to object storage by signed URL and are scanned for malware; unscanned files are not downloadable.", supports: [FR-16] }
+  - { id: BE-7, area: backend, text: "Configuration comes from the environment and secrets from a secrets manager, never the repository." }
+  - { id: BE-8, area: backend, text: "Logs are structured JSON with no personal data or task content, correlated by trace ID.", supports: [NFR-11] }
+  # 11 and 12 Data process and sync
+  - { id: DP-1, area: data, text: "Locks are taken in the order list, then task, then child rows; batches lock in ascending id order." }
+  - { id: DP-2, area: data, text: "No network call (email, push, storage) runs inside a database transaction; such work is queued after commit." }
+  - { id: DP-3, area: data, text: "Events use the transactional outbox pattern so none is lost or published for a rolled-back change." }
+  - { id: SY-1, area: sync, text: "Every client change is written to a local outbox with a client UUID and base version, then applied optimistically.", supports: [FR-50] }
+  - { id: SY-2, area: sync, text: "Per field the later server-accepted logical clock wins; delete beats edit; the overridden value is kept in history.", supports: [FR-51] }
+  - { id: SY-3, area: sync, text: "A pull cursor older than the compaction window returns 410 and the client performs a full resync.", supports: [FR-52] }
+  - { id: SY-4, area: sync, text: "Retries use exponential backoff with jitter: 1 s, 2 s, 4 s, up to 60 s.", supports: [FR-52] }

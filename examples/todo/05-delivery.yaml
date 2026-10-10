@@ -1,0 +1,107 @@
+# Todo spec, part 05: delivery, operations and reference. Mirrors spec sections 23 to 33.
+# Phases follow the prose delivery plan. The linter found FR-5, FR-6, FR-17, FR-62 and FR-14 missing from it;
+# they are now assigned (PH-1 and PH-4) and the prose plan should be updated to match.
+
+rules:
+  # 23 Infrastructure and deployment
+  - { id: INF-1, area: infra, text: "Environments are local (Docker Compose), development, staging (production-like with anonymized data) and production." }
+  - { id: INF-2, area: infra, text: "Topology is CDN, load balancer, at least 3 API containers across 3 availability zones with autoscaling, and a Postgres primary with standby and read replica; workers scale on queue depth.", supports: [NFR-1, NFR-4] }
+  - { id: INF-3, area: infra, text: "CI runs lint and type-check, unit tests, build, integration tests on ephemeral Postgres and Redis, dependency and container scans, then publishes the image.", supports: [NFR-12] }
+  - { id: INF-4, area: infra, text: "CD deploys to staging automatically, runs smoke tests, then releases to production by blue/green or canary at 5%, 25% and 100% with automatic rollback on error-rate or latency regression." }
+  - { id: INF-5, area: infra, text: "Database migrations follow expand-then-contract and are reversible or have a documented forward-fix plan." }
+  - { id: INF-6, area: infra, text: "Risky or incomplete features ship dark behind feature flags and are enabled gradually." }
+  - { id: INF-7, area: infra, text: "Backups use continuous WAL archiving for point-in-time recovery, daily snapshots and a cross-region copy, with a quarterly restore drill.", supports: [NFR-5] }
+  # 24 Observability and operations
+  - { id: OPS-1, area: ops, text: "Dashboards cover traffic, errors, latency, saturation, queue depth, database connections and replication lag, and product metrics.", supports: [NFR-11] }
+  - { id: OPS-2, area: ops, text: "Runbooks exist for elevated error rate, database failover, queue backlog, push provider outage, credential compromise and restore from backup.", supports: [NFR-11] }
+  - { id: OPS-3, area: ops, text: "On-call is a weekly rotation with blameless post-incident reviews within 5 business days and tracked action items." }
+  # 25 Testing
+  - { id: QA-1, area: quality, text: "Definition of done: code reviewed, tests added, API docs updated, accessibility checked, feature-flagged if risky, dashboards and alerts updated." }
+
+slos:
+  - { id: SLO-1, sli: "API availability (non-5xx)", target: "99.9% / 30 days", alert: "Burn rate above 2% of budget in 1 hour", runbook: runbooks/elevated-error-rate, covers: [NFR-1] }
+  - { id: SLO-2, sli: "API latency p95", target: "< 200 ms", alert: "Above 300 ms for 10 minutes", runbook: runbooks/latency, covers: [NFR-2] }
+  - { id: SLO-3, sli: "Sync success rate", target: "99.5%", alert: "Below 99% for 15 minutes", runbook: runbooks/sync-failures }
+  - { id: SLO-4, sli: "Reminder delivery delay", target: "95% within 60 s of due", alert: "Queue age above 5 minutes", runbook: runbooks/queue-backlog }
+
+tests:
+  - { id: T-1,  level: unit,          scope: "Domain logic, validators, policy module, sync merge", target: "80%+ coverage; merge rules property-tested", covers: [NFR-12] }
+  - { id: T-2,  level: integration,   scope: "API with real Postgres and Redis, migrations, authorization matrix (role by action)", target: "Every endpoint", covers: [AC-8, AC-16, AC-18, AC-20, FR-30, FR-31] }
+  - { id: T-3,  level: contract,      scope: "OpenAPI schema validation and client/server compatibility", target: "Breaking-change detection in CI", covers: [NFR-12] }
+  - { id: T-4,  level: e2e,           scope: "Critical journeys in browser and emulator", target: "Sign up, create and complete task, share list, offline sync", covers: [AC-1, AC-4, AC-6, AC-7, AC-17] }
+  - { id: T-5,  level: offline-sync,  scope: "Simulated network loss, duplicated and reordered batches", target: "No lost or duplicated changes", covers: [AC-10, AC-11, FR-50, FR-51, FR-52] }
+  - { id: T-6,  level: performance,   scope: "Load and soak at 2x expected peak", target: "Meets NFR-2 and NFR-4", covers: [NFR-2, NFR-4] }
+  - { id: T-7,  level: security,      scope: "SAST, DAST, dependency scan, annual penetration test", target: "No open high or critical findings at release", covers: [NFR-6, AC-2] }
+  - { id: T-8,  level: accessibility, scope: "Automated (axe) plus manual screen reader passes", target: "WCAG 2.2 AA", covers: [NFR-8] }
+  - { id: T-9,  level: resilience,    scope: "Kill a database node, drop Redis, delay the queue", target: "Graceful degradation per the failure table", covers: [NFR-1] }
+  - { id: T-10, level: resilience,    scope: "Quarterly restore drill", target: "RPO and RTO met", covers: [NFR-5] }
+  - { id: T-11, level: performance,   scope: "Lighthouse CI on key pages", target: "Meets the web performance budget", covers: [NFR-3] }
+  - { id: T-12, level: review,        scope: "Compliance audit plus export and erasure job tests", target: "No open findings", covers: [NFR-7, AC-12, AC-22, AC-23] }
+  - { id: T-13, level: e2e,           scope: "Browser and device test matrix", target: "Supported versions pass", covers: [NFR-9] }
+  - { id: T-14, level: review,        scope: "Pseudo-localization and RTL layout review", target: "No truncation or layout breaks", covers: [NFR-10] }
+  - { id: T-15, level: review,        scope: "Dashboard and alert review", target: "Every SLO has an alert and a runbook", covers: [NFR-11] }
+  - { id: T-16, level: integration,   scope: "Reminder scheduler, notification preferences and provider-outage chaos", target: "Delivery and fallback behave as specified", covers: [AC-9, AC-21, FR-40, FR-41, FR-42, FR-43] }
+  - { id: T-17, level: integration,   scope: "Authentication suite: registration, verification, reset, OAuth, sessions", target: "All auth endpoints", covers: [AC-3, AC-13, AC-14, AC-15] }
+
+failures:
+  - { id: FA-1,  scenario: "Redis unavailable", behavior: "API continues; sessions fall back to token validation; rate limits fail open with logging; live updates degrade to polling" }
+  - { id: FA-2,  scenario: "Database primary failover", behavior: "Writes return 503 with a retry hint for up to 60 s; clients queue and retry" }
+  - { id: FA-3,  scenario: "Push or email provider down", behavior: "Retry with backoff, fall back to the alternate channel, alert if backlog exceeds 5 minutes" }
+  - { id: FA-4,  scenario: "Duplicate submission", behavior: "The idempotency key returns the original result" }
+  - { id: FA-5,  scenario: "Same task edited on two devices", behavior: "Field-level resolution per the sync design; history preserved" }
+  - { id: FA-6,  scenario: "Recurring task completed offline twice", behavior: "Server deduplicates by task and occurrence date" }
+  - { id: FA-7,  scenario: "User's access revoked while offline", behavior: "On sync, pending changes to that list are rejected, the user is told, and the local copy is removed" }
+  - { id: FA-8,  scenario: "Clock skew on device", behavior: "The server logical clock is authoritative; device time is used only for display" }
+  - { id: FA-9,  scenario: "Time zone or daylight-saving change", behavior: "Due times are stored in UTC with the user's zone; all-day tasks keep the local date" }
+  - { id: FA-10, scenario: "Oversized or infected attachment", behavior: "Rejected at upload or quarantined; the user is notified" }
+  - { id: FA-11, scenario: "Very large lists (10000+ tasks)", behavior: "Pagination, virtualization and server-side filtering; no unbounded queries" }
+
+capacity:
+  assumptions:
+    - "100k registered users and 20k daily active"
+    - "40 task writes and 200 reads per active user per day"
+    - "10% of users have attachments"
+  estimates:
+    - { item: Daily requests, value: "About 5M (20k x 240 plus sync and background traffic)" }
+    - { item: Average and peak rate, value: "About 60 req/s average and about 600 req/s peak, within the 500 steady and 2000 burst target" }
+    - { item: Tasks stored, value: "About 20M rows at year-end growth; about 1 KB per row plus indexes, about 40 GB total" }
+    - { item: Change log, value: "About 2 GB per month before compaction" }
+    - { item: Attachments, value: "About 10k users x 50 MB = 500 GB" }
+    - { item: Compute, value: "3 API instances (2 vCPU and 4 GB each) and 2 worker instances" }
+    - { item: Database, value: "4 vCPU and 16 GB RAM, multi-AZ, plus one read replica" }
+    - { item: Rough monthly cost, value: "Low four figures in USD at launch; storage and egress dominate attachment cost" }
+
+rollout:
+  - { id: RO-1, stage: Internal alpha, audience: "Team and friendly users", exit: "Daily builds stable; feature flags default off" }
+  - { id: RO-2, stage: Closed beta, audience: "About 500 invited users", exit: "Feedback channel running and daily error-budget review clean" }
+  - { id: RO-3, stage: Open beta, audience: "Waitlist in waves of 5%, 25% and 100%", exit: "Rollback by flag proven" }
+  - { id: RO-4, stage: General availability, audience: "Everyone", exit: "Status page, runbooks and on-call in place; pen test findings closed" }
+
+phases:
+  - { id: PH-0, name: Foundations, scope: "Repo, CI/CD, IaC, auth and design system", delivers: [], exit: ["Deployed empty app with login, tracing and alerts"] }
+  - { id: PH-1, name: MVP, scope: "Tasks, lists, tags, views, search and web app", delivers: [FR-1, FR-2, FR-3, FR-5, FR-6, FR-10, FR-11, FR-12, FR-13, FR-17, FR-20, FR-21, FR-22, FR-23, FR-62], exit: ["Delivered requirements pass", "NFRs met in load test"] }
+  - { id: PH-2, name: Everywhere, scope: "PWA offline sync, reminders and push, mobile apps", delivers: [FR-40, FR-41, FR-42, FR-43, FR-50, FR-51, FR-52], exit: ["Delivered requirements pass", "Sync chaos tests green"] }
+  - { id: PH-3, name: Teams, scope: "Sharing, roles, assignment, activity log and comments", delivers: [FR-30, FR-31, FR-32, FR-33], exit: ["Authorization matrix tests complete"] }
+  - { id: PH-4, name: Hardening, scope: "Recurrence, attachments, MFA, export and deletion, pen test", delivers: [FR-4, FR-14, FR-15, FR-16, FR-60, FR-61], exit: ["Compliance review signed off", "DR drill passed"] }
+
+risks:
+  - { id: RK-1, risk: "Sync bugs cause data loss", likelihood: Medium, impact: High, mitigation: "Append-only change log, property tests, soft deletes and a client-side backup of the outbox", owner: Engineering }
+  - { id: RK-2, risk: "Scope creep toward project management", likelihood: High, impact: Medium, mitigation: "Non-goals enforced in review and a roadmap gate", owner: Product }
+  - { id: RK-3, risk: "Push notification reliability", likelihood: Medium, impact: Medium, mitigation: "Multi-channel fallback and delivery metrics", owner: Engineering }
+  - { id: RK-4, risk: "Postgres becomes the search bottleneck", likelihood: Low, impact: Medium, mitigation: "Load tests in phase 1; a dedicated search engine is a planned option", owner: Engineering }
+  - { id: RK-5, risk: "Single-region outage", likelihood: Low, impact: High, mitigation: "Cross-region backups and a documented warm-standby plan", owner: Operations }
+
+glossary:
+  - { term: Idempotency, definition: "Repeating an operation produces the same result as doing it once." }
+  - { term: Outbox (client), definition: "A queue of changes on the device not yet confirmed by the server." }
+  - { term: Transactional outbox (server), definition: "An event row written in the same transaction as the data change, then published by a relay." }
+  - { term: Tombstone, definition: "A marker that a record was deleted so the deletion can sync to other devices." }
+  - { term: "RPO and RTO", definition: "Maximum tolerable data loss and time to restore service." }
+  - { term: "SLO and SLI", definition: "Target and measured value for service reliability." }
+  - { term: Fractional indexing, definition: "A way of ordering items so inserting between two items needs only one new key." }
+  - { term: ADR, definition: "Architecture decision record." }
+
+revisions:
+  - { version: "1.0", date: "2026-10-09", author: Draft, change: "Initial reference specification" }
+  - { version: "1.1", date: "2026-10-09", author: Draft, change: "Reorganized into six parts with a full traceability matrix and split into files" }
+  - { version: "1.2", date: "2026-10-10", author: Draft, change: "Whole spec expressed in Spec Language v0.1" }

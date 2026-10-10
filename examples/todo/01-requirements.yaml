@@ -1,0 +1,82 @@
+# Todo spec, part 01: requirements. Mirrors spec sections 3, 4 and 5.
+
+requirements:
+  # 3.1 Accounts and authentication
+  - { id: FR-1,  priority: M, area: accounts, text: "The system shall allow registration with email and password; passwords must be at least 12 characters and checked against a breached-password list.", accepts: [AC-1, AC-2] }
+  - { id: FR-2,  priority: M, area: accounts, text: "The system shall verify email addresses before enabling sharing features." }
+  - { id: FR-3,  priority: M, area: accounts, text: "The system shall support OAuth 2.0 and OIDC sign-in with Google and Apple." }
+  - { id: FR-4,  priority: S, area: accounts, text: "The system shall support optional TOTP-based multi-factor authentication." }
+  - { id: FR-5,  priority: M, area: accounts, text: "The system shall support password reset via single-use links that expire in 30 minutes.", accepts: [AC-3] }
+  - { id: FR-6,  priority: M, area: accounts, text: "The system shall allow users to view and revoke active sessions." }
+  # 3.2 Tasks
+  - { id: FR-10, priority: M, area: tasks, text: "A user shall create a task with a title of 1 to 500 characters; optional fields are description, due date and time, priority, tags, list and parent task.", accepts: [AC-4, AC-5] }
+  - { id: FR-11, priority: M, area: tasks, text: "A user shall edit any field of a task they have write access to." }
+  - { id: FR-12, priority: M, area: tasks, text: "A user shall mark a task complete or reopen it; the completion time is recorded.", accepts: [AC-6] }
+  - { id: FR-13, priority: M, area: tasks, text: "Deleting a task shall be a soft delete, recoverable for 30 days, then purged.", accepts: [AC-7] }
+  - { id: FR-14, priority: S, area: tasks, text: "Tasks shall support subtasks to one level of depth." }
+  - { id: FR-15, priority: S, area: tasks, text: "Tasks shall support recurrence rules; completing a recurring task generates the next instance.", accepts: [AC-6] }
+  - { id: FR-16, priority: S, area: tasks, text: "Tasks shall support checklists and file attachments of up to 10 MB each and 25 per task." }
+  - { id: FR-17, priority: M, area: tasks, text: "Users shall reorder tasks manually within a list; the order persists across devices." }
+  # 3.3 Lists, tags and views
+  - { id: FR-20, priority: M, area: lists, text: "Users shall create, rename, archive and delete lists; every user has a default Inbox list that cannot be deleted." }
+  - { id: FR-21, priority: M, area: lists, text: "Built-in smart views shall include Today, Upcoming, Overdue, Completed and All." }
+  - { id: FR-22, priority: M, area: lists, text: "Users shall filter by list, tag, priority, due range and status, and sort by due date, priority, created date or manual order." }
+  - { id: FR-23, priority: S, area: lists, text: "The system shall provide full-text search across titles, descriptions and tags, returning results in under 300 ms at p95." }
+  # 3.4 Collaboration
+  - { id: FR-30, priority: S, area: collaboration, text: "List owners shall invite members by email with one of three roles: Owner, Editor or Viewer." }
+  - { id: FR-31, priority: S, area: collaboration, text: "Tasks in shared lists shall be assignable to a member; assignees are notified.", accepts: [AC-8] }
+  - { id: FR-32, priority: C, area: collaboration, text: "Members shall comment on tasks; comments are immutable after 15 minutes except for deletion by the author or owner." }
+  - { id: FR-33, priority: S, area: collaboration, text: "An activity log per shared list shall record who changed what and when." }
+  # 3.5 Notifications
+  - { id: FR-40, priority: M, area: notifications, text: "Users shall set reminders at an absolute time or relative to the due date.", accepts: [AC-9] }
+  - { id: FR-41, priority: M, area: notifications, text: "Reminders shall be delivered by web push and mobile push, with email as the fallback.", accepts: [AC-9] }
+  - { id: FR-42, priority: S, area: notifications, text: "Users shall configure quiet hours and a daily digest." }
+  - { id: FR-43, priority: M, area: notifications, text: "Every notification type shall be individually opt-out-able, and each email shall include one-click unsubscribe." }
+  # 3.6 Offline and sync
+  - { id: FR-50, priority: M, area: sync, text: "Clients shall allow full create, edit and complete operations while offline, queuing changes locally.", accepts: [AC-10] }
+  - { id: FR-51, priority: M, area: sync, text: "On reconnect, changes shall sync automatically; conflicts are resolved per field by server-assigned logical clock, with the losing change retained in history.", accepts: [AC-11] }
+  - { id: FR-52, priority: M, area: sync, text: "Sync shall be idempotent: replaying the same change batch has no additional effect.", accepts: [AC-10] }
+  # 3.7 Data portability and privacy
+  - { id: FR-60, priority: M, area: privacy, text: "Users shall export all of their data as JSON and CSV." }
+  - { id: FR-61, priority: M, area: privacy, text: "Users shall delete their account; all personal data is erased within 30 days and backups within 90 days.", accepts: [AC-12] }
+  - { id: FR-62, priority: M, area: privacy, text: "The system shall record consent for marketing email separately from account creation." }
+
+acceptance:
+  - { id: AC-1,  covers: [FR-1],         given: "an unregistered email and a 12+ character password not in the breach list", when: "the user submits registration", then: "an account is created, a verification email is sent, and the user lands on an empty Inbox" }
+  - { id: AC-2,  covers: [FR-1],         given: "a password found in the breach list", when: "the user registers", then: "the request returns 422 WEAK_PASSWORD and no account is created" }
+  - { id: AC-3,  covers: [FR-5],         given: "a reset link older than 30 minutes or already used", when: "it is opened", then: "the user sees link expired and can request a new one" }
+  - { id: AC-4,  covers: [FR-10],        given: "a signed-in Editor", when: "they add a task with a 1 to 500 character title", then: "it appears at the top of the list within 100 ms and the server confirms it within 500 ms at p95" }
+  - { id: AC-5,  covers: [FR-10],        given: "a title of 501 characters", when: "it is submitted", then: "the field shows an inline error and nothing is saved" }
+  - { id: AC-6,  covers: [FR-12, FR-15], given: "a weekly recurring task", when: "the user completes it", then: "it is marked done and the next occurrence is created with the due date moved forward by 7 days" }
+  - { id: AC-7,  covers: [FR-13],        given: "a task deleted within the last 30 days", when: "the user taps Undo or restores it", then: "it returns to its previous list and position" }
+  - { id: AC-8,  covers: [FR-30, FR-31], given: "a Viewer on a shared list", when: "they try to edit a task", then: "the API returns 403 FORBIDDEN_ROLE and the UI shows the task read-only" }
+  - { id: AC-9,  covers: [FR-40, FR-41], given: "a reminder set for 09:00 in the user's time zone", when: "the time arrives", then: "a push is delivered within 60 seconds at the 95th percentile, and an email is sent only if push fails" }
+  - { id: AC-10, covers: [FR-50, FR-52], given: "the device is offline", when: "the user creates and completes three tasks and then reconnects", then: "all three sync exactly once, in order, with no duplicates, even if the push request is retried" }
+  - { id: AC-11, covers: [FR-51],        given: "the same task title edited on two devices", when: "both sync", then: "the later server-accepted change wins and the overridden value appears in task history" }
+  - { id: AC-12, covers: [FR-61],        given: "a confirmed account deletion request", when: "30 days have passed", then: "all personal data is erased and the user's content in shared lists is anonymized" }
+  # Added when the linter reported Must requirements without acceptance criteria (R01)
+  - { id: AC-13, covers: [FR-2],         given: "a user whose email is not verified", when: "they invite a member to a list", then: "the API returns 403 EMAIL_NOT_VERIFIED and no invitation is created" }
+  - { id: AC-14, covers: [FR-3],         given: "a user with a Google account", when: "they complete OAuth sign-in", then: "an account is created or linked and a session starts; a provider email that is not verified is rejected" }
+  - { id: AC-15, covers: [FR-6],         given: "a user with two active sessions", when: "they revoke one of them", then: "its refresh token stops working within 1 minute and the session disappears from the list" }
+  - { id: AC-16, covers: [FR-11],        given: "an Editor and a task at version 3", when: "they save a change sending If-Match 2", then: "the API returns 412 VERSION_CONFLICT with the current task and nothing is overwritten" }
+  - { id: AC-17, covers: [FR-17],        given: "a list with three tasks", when: "the user drags the third task to the top", then: "the new order persists on other devices after sync" }
+  - { id: AC-18, covers: [FR-20],        given: "a new account", when: "registration completes", then: "an Inbox list exists, and deleting it returns 409 DEFAULT_LIST" }
+  - { id: AC-19, covers: [FR-21],        given: "open tasks with due dates yesterday, today and tomorrow", when: "the user opens the Today view", then: "only the task due today in the user's time zone is shown and the Overdue view shows yesterday's" }
+  - { id: AC-20, covers: [FR-22],        given: "tasks with different tags and priorities", when: "the user filters by one tag and high priority", then: "only tasks matching both filters are returned, in the chosen sort order" }
+  - { id: AC-21, covers: [FR-43],        given: "a user who turned off assignment push notifications", when: "a task is assigned to them", then: "no push is sent, the in-app item still appears, and every email carries one-click unsubscribe" }
+  - { id: AC-22, covers: [FR-60],        given: "a signed-in user", when: "they request a data export", then: "a JSON and CSV archive is ready within 24 hours and delivered by a signed link that expires in 7 days" }
+  - { id: AC-23, covers: [FR-62],        given: "a new account created without ticking the marketing consent box", when: "a marketing campaign runs", then: "the user receives no marketing email and no consent record exists" }
+
+nfrs:
+  - { id: NFR-1,  category: availability,    text: "Monthly availability of the API and web app",                    target: "99.9% monthly (about 43 minutes of downtime)", verify: "SLO burn-rate alerts and resilience tests" }
+  - { id: NFR-2,  category: latency,         text: "API response time for reads and writes, excluding file upload", target: "p50 < 80 ms, p95 < 200 ms, p99 < 500 ms",     verify: "Load test at 2x expected peak" }
+  - { id: NFR-3,  category: performance,     text: "Web page performance on a mid-range phone over 4G",             target: "LCP < 2.5 s, INP < 200 ms",                   verify: "Lighthouse CI budget" }
+  - { id: NFR-4,  category: scalability,     text: "Sustained and burst request rate",                              target: "500 req/s steady, 2000 req/s burst",           verify: "Load test at 2x expected peak" }
+  - { id: NFR-5,  category: durability,      text: "Recovery objectives",                                           target: "RPO <= 5 minutes, RTO <= 1 hour",              verify: "Quarterly restore drill" }
+  - { id: NFR-6,  category: security,        text: "Security standard and encryption",                              target: "OWASP ASVS Level 2; TLS 1.2+; AES-256 at rest", verify: "SAST, DAST and annual penetration test" }
+  - { id: NFR-7,  category: privacy,         text: "Privacy compliance",                                            target: "GDPR and CCPA compliant; erasure within 30 days; regulator notice within 72 hours",                      verify: "Compliance audit and erasure tests" }
+  - { id: NFR-8,  category: accessibility,   text: "Accessibility conformance",                                     target: "WCAG 2.2 AA",                                  verify: "Automated checks plus a screen reader pass" }
+  - { id: NFR-9,  category: compatibility,   text: "Supported browsers and operating systems",                      target: "Latest 2 versions of Chrome, Safari, Firefox, Edge; iOS 16+; Android 10+", verify: "Browser and device test matrix" }
+  - { id: NFR-10, category: localization,    text: "Localization support",                                          target: "UTF-8 everywhere; RTL layouts; 1 time zone per user", verify: "Pseudo-localization and RTL review" }
+  - { id: NFR-11, category: observability,   text: "Tracing and alert coverage",                                    target: "100% of requests carry a trace ID; every SLO has 1 alert", verify: "Dashboard and alert review" }
+  - { id: NFR-12, category: maintainability, text: "Code quality gates",                                            target: "80% unit-test coverage on domain logic; 0 critical static-analysis findings", verify: "CI quality gates" }

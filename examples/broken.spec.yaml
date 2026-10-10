@@ -1,0 +1,91 @@
+# A deliberately flawed spec. Every problem below should be caught by speclint.py.
+# Run:  python speclint.py broken.spec.yaml
+
+spec: { name: Broken Example, version: "0.1" }
+
+requirements:
+  - id: FR-1
+    priority: M
+    text: The app should be fast and easy to use for everyone.          # R04 no "shall", R05 vague words, R01 no acceptance
+  - id: FR-2
+    priority: M
+    text: The system shall let a user archive a list.
+    accepts: [AC-9]                                                       # R02 unknown criterion, R01 nothing covers it
+  - id: FR-3
+    priority: M
+    text: The system shall export all user data as JSON.                  # R18 nothing implements it
+
+acceptance:
+  - id: AC-1
+    covers: [FR-77]                                                       # R02 unknown requirement
+    given: a user with tasks
+    when: they open the list
+    then: they see the tasks
+
+nfrs:
+  - id: NFR-1
+    category: latency
+    text: Pages must load quickly
+    target: as fast as possible                                           # R06 no number, R05 vague word
+    verify: manual check
+
+entities:
+  - name: Task
+    owner: tasks
+    fields: [{ name: id, type: uuid }]
+    states:
+      values: [open, done, archived]
+      initial: open
+      transitions:
+        - { from: open, to: done,    event: complete, by: [Editor] }
+        - { from: done, to: deleted, event: delete,   by: [Editor] }        # R15 undeclared state; "archived" is unreachable
+
+operations:
+  - id: createTask
+    method: POST                                                          # R11 POST without idempotent
+    path: /tasks
+    implements: [FR-1]
+    permission: [Editor]
+    errors: [VALIDATION_FAILED, QUOTA_EXCEEDED]                           # R08 QUOTA_EXCEEDED not in catalogue
+    touches: { Task: C, Project: C, Audit: C }                            # R10 unknown entities; R12 no tx
+  - id: renameTask
+    method: PATCH                                                         # R11 PATCH without if-match (PUT must declare concurrency too)
+    path: /tasks/{id}
+    implements: [FR-1]
+    permission: [Editor]
+    errors: []
+    touches: { Task: U }
+
+errors:
+  - { code: VALIDATION_FAILED, status: 422, meaning: Bad input, client: Show inline errors }
+  - { code: TEAPOT, status: 418, meaning: I am a teapot, client: Smile }  # R09 never used
+
+components:
+  - name: ListScreen
+    kind: screen
+    uses: [createTask, deleteTask]                                        # R14 unknown operation
+    states: [default, loading]                                            # R13 missing empty, error, offline, no-permission
+
+# ---- v0.1 additions: flaws for the newer rules ----
+roles: [Anonymous, Editor]
+
+tests:
+  - { id: T-1, level: unit, scope: "Task logic", target: "80% coverage", covers: [FR-99] }          # R20 unknown id
+
+threats:
+  - { id: TH-1, category: Spoofing, example: "Credential stuffing", mitigation: "Rate limiting", test: T-9 }   # R21 test does not exist
+
+notifications:
+  - { id: NT-1, type: Marketing blast, trigger: "Weekly", channels: [email], rules: "Sent to all", opt_out: false }   # R22 mandatory but not security
+
+analytics:
+  - { event: task_created, properties: [title, source], purpose: Engagement }                       # R23 title is user content
+
+plans:
+  - { limit: Lists, free: "10", pro: Unlimited }                                                    # R24 no PLAN_LIMIT error
+
+phases:
+  - { id: PH-1, name: MVP, scope: "Basics", delivers: [FR-1], exit: ["Pass"] }                      # R25 FR-2 and FR-3 never delivered
+
+flows:
+  - { id: UC-1, name: Open a list, steps: [Open], covers: [FR-42] }                                 # R26 unknown requirement

@@ -1,0 +1,78 @@
+# Todo spec, part 00: meta. Mirrors spec sections 1, 2 and 6.
+# Validate everything:  python speclint.py todo/ --build build/
+
+spec:
+  name: Todo App
+  version: "1.2"
+  status: draft
+
+roles: [Anonymous, Authenticated, Viewer, Editor, Owner, Support, System]
+
+goals:
+  - { id: G-1, text: "Create, edit, complete and organize tasks in under 3 interactions", metric: interactions per action }
+  - { id: G-2, text: "Work seamlessly on web and mobile, with offline use and automatic sync" }
+  - { id: G-3, text: "Support shared lists with role-based access" }
+  - { id: G-4, text: "Meet 99.9% monthly availability and p95 API latency under 200 ms", metric: "availability and p95 latency" }
+
+nongoals:
+  - Full project management (Gantt charts, time tracking, billing)
+  - Native desktop apps (the PWA covers desktop)
+  - Real-time co-editing of a single task description (last-write-wins with field-level merge is sufficient)
+
+personas:
+  - { id: P-1, name: Individual user, needs: "Quick capture, due dates, reminders, search" }
+  - { id: P-2, name: Team member, needs: "Shared lists, assignment, comments" }
+  - { id: P-3, name: List owner or admin, needs: "Manage members, permissions, archive" }
+  - { id: P-4, name: Support or admin staff, needs: "Account lookup, abuse handling, audit trail without access to task content by default" }
+
+flows:
+  - id: UC-1
+    name: Sign up and log in
+    persona: P-1
+    steps: [Register or use Google or Apple, Verify email, Land on empty Inbox, Reset password if forgotten]
+    covers: [FR-1, FR-2, FR-3, FR-5]
+  - id: UC-2
+    name: Create a task
+    persona: P-1
+    steps: [Open quick add, Type a title, Optionally set due date and priority, See it at the top of the list]
+    covers: [FR-10, FR-11]
+  - id: UC-3
+    name: Tag and filter
+    persona: P-1
+    steps: [Add tags to tasks, Open a smart view, Combine filters, Sort the list]
+    covers: [FR-21, FR-22, FR-23]
+  - id: UC-4
+    name: Complete or reopen
+    persona: P-1
+    steps: [Tick the checkbox, Undo within five seconds or reopen later, Recurring task spawns the next one]
+    covers: [FR-12, FR-15]
+  - id: UC-5
+    name: Share a list
+    persona: P-3
+    steps: [Invite by email with a role, Invitee accepts, Assign tasks, Comment on tasks]
+    covers: [FR-30, FR-31, FR-32, FR-33]
+  - id: UC-6
+    name: Receive a reminder
+    persona: P-1
+    steps: [Set a reminder, Receive push at the time, Email fallback if push fails]
+    covers: [FR-40, FR-41, FR-42, FR-43]
+  - id: UC-7
+    name: Work offline then sync
+    persona: P-2
+    steps: [Edit while offline, Changes queue locally, Reconnect, Changes sync once without duplicates]
+    covers: [FR-50, FR-51, FR-52]
+  - id: UC-8
+    name: Export or delete account data
+    persona: P-1
+    steps: [Request export, Download archive, Or confirm deletion after re-authentication]
+    covers: [FR-60, FR-61, FR-62]
+
+assumptions:
+  - { id: A-1, text: "Expected scale at launch is 100k registered users and 20k daily active, growing 3x in year one", owner: Product, default: "100k registered, 20k DAU", needed_by: Before phase 1 }
+  - { id: A-2, text: "Hosting is on a single major cloud provider with one primary region plus a backup region", owner: Engineering, default: Single primary region, needed_by: Before phase 0 }
+  - { id: A-3, text: "Users authenticate with email and password or Google and Apple sign-in", owner: Product, default: "Email, Google, Apple", needed_by: Before phase 1 }
+  - { id: Q-1, text: End-to-end encryption of task content, owner: "Product, Security", default: "Not required in v1 (server-side search and reminders need plaintext)", needed_by: Before phase 1 }
+  - { id: Q-2, text: Data residency regions, owner: Legal, default: Single primary region, needed_by: Before GA }
+  - { id: Q-3, text: Public API and webhooks, owner: Product, default: Not in v1, needed_by: Before phase 3 }
+  - { id: Q-4, text: Free versus paid limits, owner: Product, default: Proposed values in plans stand, needed_by: Before open beta }
+  - { id: Q-5, text: Combobox behavior when Enter is pressed before results arrive, owner: UX, default: "Select nothing and keep the menu open", needed_by: Before phase 1 }
