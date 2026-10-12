@@ -1,0 +1,221 @@
+# Todo spec, part 06: request and response types (new in v0.2).
+# A type starts from an entity (`from`, with `only` or `omit`) so the field definitions are written once,
+# then adds or overrides fields. `required` lists exactly the required fields.
+
+types:
+  # --- Accounts and sessions
+  - name: RegisterRequest
+    fields:
+      - { name: email, type: string, required: true }
+      - { name: password, type: "string[12..200]", required: true }
+      - { name: display_name, type: string }
+      - { name: time_zone, type: string }
+      - { name: marketing_consent, type: boolean, note: "Optional; recorded separately from account creation (FR-62)" }
+    example: { email: ana@example.com, password: correct-horse-battery, display_name: Ana, time_zone: Asia/Taipei, marketing_consent: false }
+  - name: LoginRequest
+    fields:
+      - { name: email, type: string, required: true }
+      - { name: password, type: string, required: true }
+      - { name: mfa_code, type: "string[6..8]" }
+    example: { email: ana@example.com, password: correct-horse-battery }
+  - name: OAuthRequest
+    fields:
+      - { name: id_token, type: string, required: true }
+      - { name: time_zone, type: string }
+  - name: VerifyEmailRequest
+    fields: [{ name: token, type: string, required: true }]
+  - name: PasswordResetRequest
+    fields: [{ name: email, type: string, required: true }]
+  - name: PasswordResetConfirm
+    fields:
+      - { name: token, type: string, required: true }
+      - { name: new_password, type: "string[12..200]", required: true }
+  - name: MfaEnrollRequest
+    fields: [{ name: code, type: "string[6..8]", required: true }]
+  - name: UserProfile
+    from: User
+    omit: [password_hash, mfa_secret_enc, deleted_at]
+  - name: AuthResult
+    fields:
+      - { name: access_token, type: string, required: true }
+      - { name: expires_in, type: integer, required: true, note: "Seconds; the access token lives 15 minutes" }
+      - { name: user, type: UserProfile, required: true }
+  - name: Session
+    from: Session
+    omit: [refresh_token_hash]
+  - name: SessionList
+    fields: [{ name: items, type: "Session[]", required: true }]
+
+  # --- Lists
+  - name: List
+    from: List
+    omit: [deleted_at]
+  - name: ListPage
+    fields:
+      - { name: items, type: "List[]", required: true }
+      - { name: next_cursor, type: string }
+  - name: ListCreate
+    from: List
+    only: [name, sort_key]
+    required: [name]
+  - name: ListPatch
+    from: List
+    only: [name, archived_at, sort_key]
+    required: []
+
+    constraints:
+      - at_least_one: [name, archived_at, sort_key]
+    example: { name: Groceries }
+  # --- Tasks, tags, reminders, attachments
+  - name: Task
+    from: Task
+    omit: [deleted_at]
+    fields: [{ name: tags, type: "string[]" }]
+  - name: TaskPage
+    fields:
+      - { name: items, type: "Task[]", required: true }
+      - { name: next_cursor, type: string }
+  - name: TaskCreate
+    from: Task
+    only: [id, list_id, parent_id, title, description, priority, due_at, recurrence_rule, sort_key, assignee_id]
+    required: [id, list_id, title]
+    fields:
+      - { name: tags, type: "string[]" }
+      - { name: reminder_at, type: timestamp, note: "Optional absolute reminder created with the task" }
+    example:
+      id: 018f3b2e-7c41-7a9d-b0a1-3f1c9e5d2a10
+      list_id: 018f3b2d-0000-7000-8000-000000000001
+      title: Renew passport
+      due_at: "2026-11-02T09:00:00Z"
+      priority: high
+      tags: [admin]
+    checks:
+      - { left: reminder_at, op: "<=", right: due_at, message: "The reminder must not be after the due date" }
+  - name: TaskPatch
+    from: Task
+    only: [list_id, title, description, priority, due_at, recurrence_rule, sort_key, assignee_id]
+    required: []
+    fields: [{ name: tags, type: "string[]" }]
+    constraints:
+      - at_least_one: [list_id, title, description, priority, due_at, recurrence_rule, sort_key, assignee_id, tags]
+    example: { title: Renew passport, priority: high }
+  - name: CompleteTaskRequest
+    fields: [{ name: completed_at, type: timestamp, note: "Defaults to server time; must not be in the future" }]
+  - name: CompleteTaskResult
+    fields:
+      - { name: task, type: Task, required: true }
+      - { name: next_task, type: Task, note: "Present when the task recurs" }
+  - name: Tag
+    from: Tag
+  - name: TagCreate
+    from: Tag
+    only: [name]
+    required: [name]
+  - name: ReminderCreate
+    from: Reminder
+    only: [remind_at, channel]
+    required: []
+    fields: [{ name: offset_minutes, type: integer, note: "Minutes before the due date; use instead of remind_at" }]
+    constraints:
+      - exactly_one: [remind_at, offset_minutes]
+    example: { offset_minutes: 30, channel: push }
+    # offset_minutes is minutes before the due date, so it cannot be negative
+    checks:
+      - { left: offset_minutes, op: ">=", value: 0 }
+  - name: Reminder
+    from: Reminder
+  - name: UploadUrlRequest
+    fields:
+      - { name: task_id, type: uuid, required: true }
+      - { name: filename, type: string, required: true }
+      - { name: content_type, type: string, required: true }
+      - { name: size_bytes, type: bigint, required: true }
+    example: { task_id: 018f3b2e-7c41-7a9d-b0a1-3f1c9e5d2a10, filename: passport.pdf, content_type: application/pdf, size_bytes: 482113 }
+    checks:
+      - { left: size_bytes, op: ">", value: 0 }
+      - { left: size_bytes, op: "<=", value: 10485760, message: "Attachments are limited to 10 MB (FR-16)" }
+  - name: UploadUrl
+    fields:
+      - { name: attachment_id, type: uuid, required: true }
+      - { name: upload_url, type: string, required: true }
+      - { name: expires_at, type: timestamp, required: true }
+
+  # --- Collaboration
+  - name: Member
+    from: ListMember
+    omit: [invitation_token_hash, invited_by]
+    fields:
+      - { name: display_name, type: string }
+      - { name: email, type: string }
+      - { name: avatar_url, type: string }
+  - name: MemberPage
+    fields:
+      - { name: items, type: "Member[]", required: true }
+      - { name: next_cursor, type: string }
+  - name: InviteRequest
+    fields:
+      - { name: email, type: string, required: true }
+      - { name: role, type: "owner | editor | viewer", required: true }
+    example: { email: lee@example.com, role: editor }
+  - name: MemberRolePatch
+    fields: [{ name: role, type: "owner | editor | viewer", required: true }]
+  - name: Comment
+    from: Comment
+    omit: [deleted_at]
+  - name: CommentCreate
+    fields: [{ name: body, type: "string[1..5000]", required: true }]
+  - name: ActivityEntry
+    from: ChangeLog
+    only: [seq, entity_type, entity_id, op, actor_id]
+    fields: [{ name: created_at, type: timestamp, required: true }]
+  - name: ActivityPage
+    fields:
+      - { name: items, type: "ActivityEntry[]", required: true }
+      - { name: next_cursor, type: string }
+
+  # --- Notifications, sync, privacy
+  - name: NotificationPreference
+    from: NotificationPreference
+    omit: [user_id]
+  - name: NotificationPreferenceSet
+    fields: [{ name: items, type: "NotificationPreference[]", required: true }]
+  - name: SyncChange
+    fields:
+      - { name: id, type: uuid, required: true, note: "Client-generated change id, used for deduplication" }
+      - { name: entity_type, type: string, required: true }
+      - { name: entity_id, type: uuid, required: true }
+      - { name: op, type: "create | update | delete", required: true }
+      - { name: base_version, type: integer }
+      - { name: fields, type: json }
+      - { name: client_time, type: timestamp, note: "For display only; the server clock decides" }
+  - name: SyncPush
+    fields: [{ name: changes, type: "SyncChange[]", required: true }]
+    example:
+      changes:
+        - id: 018f3b30-1111-7000-8000-000000000010
+          entity_type: task
+          entity_id: 018f3b2e-7c41-7a9d-b0a1-3f1c9e5d2a10
+          op: update
+          base_version: 3
+          fields: { title: Renew passport and visa }
+  - name: SyncConflict
+    fields:
+      - { name: change_id, type: uuid, required: true }
+      - { name: reason, type: string, required: true }
+      - { name: current, type: json }
+  - name: SyncPushResult
+    fields:
+      - { name: applied, type: integer, required: true }
+      - { name: seq, type: bigint, required: true }
+      - { name: conflicts, type: "SyncConflict[]" }
+  - name: SyncEntry
+    from: ChangeLog
+    only: [seq, entity_type, entity_id, op, payload]
+  - name: SyncPull
+    fields:
+      - { name: changes, type: "SyncEntry[]", required: true }
+      - { name: next_seq, type: bigint, required: true }
+  - name: ExportAccepted
+    fields: [{ name: job_id, type: uuid, required: true }]
+  - name: ConsentRequest
+    fields: [{ name: marketing, type: boolean, required: true }]

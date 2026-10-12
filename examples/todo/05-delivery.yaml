@@ -26,7 +26,7 @@ slos:
 
 tests:
   - { id: T-1,  level: unit,          scope: "Domain logic, validators, policy module, sync merge", target: "80%+ coverage; merge rules property-tested", covers: [NFR-12] }
-  - { id: T-2,  level: integration,   scope: "API with real Postgres and Redis, migrations, authorization matrix (role by action)", target: "Every endpoint", covers: [AC-8, AC-16, AC-18, AC-20, FR-30, FR-31] }
+  - { id: T-2,  level: integration,   scope: "API with real Postgres and Redis, migrations, authorization matrix (role by action), input validation, smart-view queries", target: "Every endpoint", covers: [AC-5, AC-8, AC-16, AC-18, AC-19, AC-20, FR-30, FR-31] }
   - { id: T-3,  level: contract,      scope: "OpenAPI schema validation and client/server compatibility", target: "Breaking-change detection in CI", covers: [NFR-12] }
   - { id: T-4,  level: e2e,           scope: "Critical journeys in browser and emulator", target: "Sign up, create and complete task, share list, offline sync", covers: [AC-1, AC-4, AC-6, AC-7, AC-17] }
   - { id: T-5,  level: offline-sync,  scope: "Simulated network loss, duplicated and reordered batches", target: "No lost or duplicated changes", covers: [AC-10, AC-11, FR-50, FR-51, FR-52] }

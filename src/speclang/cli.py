@@ -6,11 +6,22 @@ Usage:
   speclint a.yaml b.yaml --build build/
   speclint todo/ --strict             # warnings fail the run too
 
+  speclint diff old/ new/ [--md]                # change report between two versions
+  speclint sync doc.md --spec todo/ [--check]   # write generated tables into a Markdown file
+  speclint watch todo/ [--build DIR] [--sync DOC]  # re-check on every change
+  speclint init DIR [--name NAME]               # starter project that passes the linter
+  speclint schema [--for todo/] [-o FILE]       # JSON Schema for editors, enriched with your IDs
+  speclint gherkin todo/ -o tests/ [--steps]    # feature files and pytest-bdd stubs from acceptance criteria
+  speclint import-openapi api.yaml -o spec/     # starting spec from an existing OpenAPI file
+  speclint diff old/ new/ --breaking            # also list changes that break API clients
+
 Multiple files are merged: list sections are concatenated, the first `spec` block wins.
+A file can pull in others with `include: [../shared-spec]` (paths relative to the file; folders and globs work).
 Exit code: 0 if no errors, 1 otherwise.
 """
 import argparse
 import json
+import os
 import re
 import sys
 from collections import Counter, defaultdict
@@ -18,6 +29,14 @@ from pathlib import Path
 
 import yaml
 from jsonschema import Draft7Validator
+
+from . import __version__
+from .diff import breaking_changes, format_diff
+from .editor import enriched_schema, init_project
+from .gherkin import build_behave_steps, build_conftest, build_features, build_steps
+from .importer import import_openapi
+from .openapi import gen_openapi
+from .typesys import lint_types
 
 VAGUE_WORDS = [
     "fast", "easy", "easily", "secure", "securely", "user-friendly", "intuitive",
@@ -31,7 +50,7 @@ ANALYTICS_FORBIDDEN = {"title", "description", "body", "comment", "query", "emai
 DUP_CHECKS = [
     ("requirements", "id"), ("acceptance", "id"), ("nfrs", "id"), ("entities", "name"),
     ("operations", "id"), ("errors", "code"), ("components", "name"), ("decisions", "id"),
-    ("slos", "id"), ("goals", "id"), ("assumptions", "id"), ("personas", "id"), ("flows", "id"),
+    ("slos", "id"), ("types", "name"), ("goals", "id"), ("assumptions", "id"), ("personas", "id"), ("flows", "id"),
     ("tests", "id"), ("rules", "id"), ("threats", "id"), ("failures", "id"),
     ("notifications", "id"), ("risks", "id"), ("phases", "id"), ("rollout", "id"),
 ]
@@ -60,18 +79,69 @@ class Report:
 
 # ------------------------------------------------------------------ loading
 
+class SpecError(Exception):
+    """A problem with the spec files themselves (unreadable YAML, a missing include), not with the spec's content."""
+
+
 def collect_files(paths):
     files = []
     for p in map(Path, paths):
+        if not p.exists():
+            raise SpecError(f"{p} does not exist")
         files.extend(sorted(p.glob("*.yaml")) if p.is_dir() else [p])
     return files
 
 
-def load_specs(paths):
-    merged = {}
+def _read_yaml(f):
+    try:
+        data = yaml.safe_load(Path(f).read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        first = str(exc).strip().splitlines()[0] if str(exc).strip() else "invalid YAML"
+        mark = getattr(exc, "problem_mark", None)
+        where = f" (line {mark.line + 1})" if mark else ""
+        raise SpecError(f"{f}: cannot read YAML{where}: {first}") from exc
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise SpecError(f"{f}: a spec file must be a mapping of sections, not a {type(data).__name__}")
+    return data
+
+
+def expand_files(paths):
+    """Every file that makes up a spec: the given files plus everything they `include`, each once."""
+    seen, out = set(), []
+
+    def visit(f, via=None):
+        f = Path(f).resolve()
+        if f in seen:
+            return
+        seen.add(f)
+        out.append(f)
+        includes = _read_yaml(f).get("include") or []
+        if not isinstance(includes, list):
+            raise SpecError(f"{f}: 'include' must be a list")
+        for inc in includes:
+            target = f.parent / inc
+            matches = sorted(f.parent.glob(inc)) if any(ch in inc for ch in "*?[") else [target]
+            matches = [m for m in matches if m.exists()]
+            if not matches:
+                raise SpecError(f"{f}: include '{inc}' matches nothing")
+            for m in matches:
+                for sub in (sorted(m.glob("*.yaml")) if m.is_dir() else [m]):
+                    visit(sub, f)
+
     for f in collect_files(paths):
-        data = yaml.safe_load(f.read_text(encoding="utf-8")) or {}
-        for key, value in data.items():
+        visit(f)
+    return out
+
+
+def load_specs(paths):
+    """Merge every spec file (and its includes): lists are concatenated, the first `spec` block wins."""
+    merged = {}
+    for f in expand_files(paths):
+        for key, value in _read_yaml(f).items():
+            if key == "include":
+                continue
             if key == "spec":
                 merged.setdefault("spec", value)
             elif isinstance(value, list):
@@ -309,6 +379,18 @@ def lint(spec, report):
             if ref not in req_ids | nfr_ids:
                 report.add("ERROR", "R30", f"rules[{r['id']}]", f"supports unknown requirement {ref}")
 
+    # R38 / R39 test coverage
+    cov = coverage_data(spec)
+    for ac in acs:
+        if not cov["ac_tests"][ac["id"]]:
+            report.add("WARN", "R38", f"acceptance[{ac['id']}]", "no test covers this acceptance criterion")
+    for r in reqs:
+        if r["priority"] == "M" and cov["status"][r["id"]] == "not tested":
+            report.add("WARN", "R39", f"requirements[{r['id']}]", "Must requirement has acceptance criteria but no test covers it, directly or through them")
+
+    # R31-R35 field-level rules (types, request/response, component fields)
+    lint_types(spec, report)
+
 
 # --------------------------------------------------------------- generators
 
@@ -435,64 +517,106 @@ def gen_states(spec):
     return page("State machines", "\n".join(out))
 
 
-def gen_openapi(spec):
-    errors = {e["code"]: e for e in spec.get("errors", [])}
-    globals_ = [e for e in errors.values() if e.get("global")]
-    paths = {}
+def coverage_data(spec):
+    """Per requirement: acceptance criteria, tests (direct or through its criteria), and a status."""
+    ac_tests, direct, ac_for = defaultdict(set), defaultdict(set), defaultdict(set)
+    for t in spec.get("tests", []):
+        for ref in t["covers"]:
+            (ac_tests if ref.startswith("AC-") else direct)[ref].add(t["id"])
+    for a in spec.get("acceptance", []):
+        for ref in a["covers"]:
+            ac_for[ref].add(a["id"])
+    for r in spec["requirements"]:
+        ac_for[r["id"]].update(r.get("accepts", []))
+    acs, tests, status = {}, {}, {}
+    for r in spec["requirements"]:
+        rid = r["id"]
+        acs[rid] = sorted(ac_for[rid])
+        tests[rid] = set(direct[rid])
+        for ac in acs[rid]:
+            tests[rid] |= ac_tests[ac]
+        status[rid] = ("no acceptance criterion" if not acs[rid]
+                       else "not tested" if not tests[rid] else "covered")
+    return {"ac_tests": ac_tests, "acs": acs, "tests": tests, "status": status}
+
+
+def gen_coverage(spec):
+    cov = coverage_data(spec)
+    reqs = {r["id"]: r for r in spec["requirements"]}
+    phases = spec.get("phases", [])
+    summary, sections, delivered = [], [], set()
+    for ph in phases:
+        ids = [i for i in ph["delivers"] if i in reqs]
+        delivered.update(ids)
+        counts = Counter(cov["status"][i] for i in ids)
+        summary.append([ph["id"], ph["name"], len(ids), counts["covered"], counts["not tested"], counts["no acceptance criterion"]])
+        if ids:
+            rows = [[i, reqs[i]["priority"], ", ".join(cov["acs"][i]) or "-", ", ".join(sorted(cov["tests"][i])) or "-", cov["status"][i]]
+                    for i in ids]
+            sections.append(f"## {ph['id']} {ph['name']}\n\n" + md_table(["Requirement", "Pri", "Acceptance", "Tests", "Status"], rows))
+    loose = [i for i in reqs if i not in delivered]
+    if loose:
+        rows = [[i, reqs[i]["priority"], cov["status"][i]] for i in loose]
+        sections.append("## Not delivered by any phase\n\n" + md_table(["Requirement", "Pri", "Status"], rows))
+    ac_gaps = [a["id"] for a in spec.get("acceptance", []) if not cov["ac_tests"][a["id"]]]
+    head = md_table(["Phase", "Name", "Requirements", "Covered", "Not tested", "No acceptance"], summary)
+    tail = ("\nAcceptance criteria with no test: " + (", ".join(ac_gaps) if ac_gaps else "none") + "\n")
+    return page("Test coverage by phase", head + "\n" + "\n".join(sections) + tail)
+
+
+def gen_endpoints(spec):
+    rows = []
     for o in spec.get("operations", []):
-        params = [{"name": n, "in": "path", "required": True, "schema": {"type": "string"}}
-                  for n in re.findall(r"{(\w+)}", o["path"])]
-        if o["method"] == "POST" and o.get("idempotent"):
-            params.append({"name": "Idempotency-Key", "in": "header", "required": False, "schema": {"type": "string"}})
-        if o.get("concurrency") == "if-match":
-            params.append({"name": "If-Match", "in": "header", "required": True, "schema": {"type": "integer"}})
-        success = o.get("success") or (204 if o["method"] == "DELETE" else 200)
-        responses = {str(success): {"description": "Success"}}
-        by_status = defaultdict(list)
-        for code in o["errors"] + [g["code"] for g in globals_]:
-            by_status[errors[code]["status"]].append(code)
-        for status, codes in sorted(by_status.items()):
-            responses[str(status)] = {
-                "description": ", ".join(sorted(set(codes))),
-                "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}}}}
-        op = {"operationId": o["id"], "summary": o.get("summary") or o["id"],
-              "tags": [o["path"].strip("/").split("/")[0] or "root"], "parameters": params,
-              "responses": responses,
-              "x-implements": o["implements"], "x-permission": o["permission"], "x-touches": o["touches"]}
-        if o["permission"] == ["Anonymous"]:
-            op["security"] = []
-        if o["method"] in {"POST", "PUT", "PATCH"}:
-            op["requestBody"] = {"required": True, "content": {"application/json": {"schema": {"type": "object"}}}}
-        paths.setdefault(o["path"], {})[o["method"].lower()] = op
-    doc = {"openapi": "3.1.0",
-           "info": {"title": spec["spec"]["name"] + " API", "version": spec["spec"]["version"],
-                    "description": "Skeleton generated from the spec; request and response bodies are placeholders."},
-           "security": [{"bearerAuth": []}],
-           "paths": paths,
-           "components": {
-               "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}},
-               "schemas": {"Problem": {"type": "object", "required": ["type", "title", "status", "code", "traceId"],
-                                       "properties": {"type": {"type": "string"}, "title": {"type": "string"},
-                                                      "status": {"type": "integer"}, "detail": {"type": "string"},
-                                                      "code": {"type": "string"}, "traceId": {"type": "string"},
-                                                      "errors": {"type": "array", "items": {"type": "object"}}}}}}}
-    return yaml.safe_dump(doc, sort_keys=False, width=100)
+        succ = o.get("success") or (204 if o["method"] == "DELETE" else 200)
+        notable = ", ".join(c for c in o["errors"]) or "-"
+        rows.append([f"`{o['method']} {o['path']}`", o.get("summary") or o["id"], succ, notable])
+    return page("Endpoint summary", md_table(["Method and path", "Operation", "Success", "Notable errors"], rows))
+
+
+def gen_entities(spec):
+    out = []
+    for e in spec.get("entities", []):
+        rows = [[f["name"], f["type"], "yes" if f.get("required") else "", f.get("note", "")] for f in e["fields"]]
+        extra = f"Owner: {e['owner']}. " + (f"Retention: {e['retention']}" if e.get("retention") else "")
+        out.append(f"## {e['name']}\n\n{extra}\n\n" + md_table(["Field", "Type", "Required", "Note"], rows))
+    return page("Data model", "\n".join(out))
+
+
+def gen_spec_tables(spec, pieces):
+    """One file with every generated table under the section numbers of the prose spec."""
+    order = [
+        ("4. Acceptance Criteria", "acceptance.md"), ("9.1 Entities", "entities.md"),
+        ("11.2 Interaction matrix", "interaction-matrix.md"), ("13.2 Endpoint summary", "endpoints.md"),
+        ("14. Error Catalogue", "error-catalogue.md"), ("17.2 Threat model", "threat-model.md"),
+        ("19. Notifications", "notifications.md"), ("20. Analytics events", "analytics-events.md"),
+        ("22. Plans and limits", "plans.md"), ("29. Delivery plan", "delivery-plan.md"),
+        ("29.1 Test coverage by phase", "coverage.md"),
+        ("30. Risk register", "risk-register.md"), ("31. Requirement traceability", "traceability.md"),
+    ]
+    out = [f"# {spec['spec']['name']}: generated tables (paste under the matching sections)\n"]
+    for heading, fname in order:
+        body = pieces[fname].split("\n", 2)[2]  # drop the generated title line and blank line
+        out.append(f"\n## {heading}\n\n{body}")
+    return "".join(out)
 
 
 def build(spec, outdir):
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
-    files = {
+    generators = {
         "traceability.md": gen_traceability, "acceptance.md": gen_acceptance,
         "error-catalogue.md": gen_errors, "interaction-matrix.md": gen_matrix,
         "permission-matrix.md": gen_permissions, "notifications.md": gen_notifications,
         "analytics-events.md": gen_analytics, "plans.md": gen_plans, "threat-model.md": gen_threats,
         "risk-register.md": gen_risks, "delivery-plan.md": gen_phases, "state-machines.md": gen_states,
+        "endpoints.md": gen_endpoints, "entities.md": gen_entities, "coverage.md": gen_coverage,
         "openapi.yaml": gen_openapi,
     }
-    for name, fn in files.items():
-        (out / name).write_text(fn(spec), encoding="utf-8")
-    print(f"wrote {len(files)} files to {out}/")
+    pieces = {name: fn(spec) for name, fn in generators.items()}
+    pieces["spec-tables.md"] = gen_spec_tables(spec, pieces)
+    for name, text in pieces.items():
+        (out / name).write_text(text, encoding="utf-8")
+    print(f"wrote {len(pieces)} files to {out}/")
 
 
 def stats(spec):
@@ -500,9 +624,208 @@ def stats(spec):
     print("constructs: " + ", ".join(parts))
 
 
-def main():
+BLOCKS = {
+    "acceptance": gen_acceptance, "entities": gen_entities, "interaction": gen_matrix,
+    "endpoints": gen_endpoints, "errors": gen_errors, "permissions": gen_permissions,
+    "threats": gen_threats, "notifications": gen_notifications, "analytics": gen_analytics,
+    "plans": gen_plans, "delivery": gen_phases, "risks": gen_risks, "traceability": gen_traceability,
+    "coverage": gen_coverage, "states": gen_states,
+}
+MARKER = re.compile(r"(?P<open><!--\s*speclang:(?P<name>[\w-]+)\s*-->)(?P<body>.*?)(?P<close><!--\s*/speclang:(?P=name)\s*-->)", re.S)
+
+
+def sync_text(text, spec):
+    """Replace the content between speclang markers with freshly generated tables.
+
+    Returns (new_text, updated_names, unknown_names). Text outside the markers is never touched.
+    """
+    updated, unknown = [], []
+
+    def repl(m):
+        name = m.group("name")
+        gen = BLOCKS.get(name)
+        if gen is None:
+            unknown.append(name)
+            return m.group(0)
+        body = gen(spec).split("\n", 2)[2].strip()
+        new = f"{m.group('open')}\n\n{body}\n\n{m.group('close')}"
+        if new != m.group(0):
+            updated.append(name)
+        return new
+
+    return MARKER.sub(repl, text), updated, unknown
+
+
+def sync_main(argv):
+    p = argparse.ArgumentParser(prog="speclint sync", description="Write generated tables into Markdown files between speclang markers.")
+    p.add_argument("files", nargs="+", help="Markdown files containing <!-- speclang:NAME --> ... <!-- /speclang:NAME --> markers")
+    p.add_argument("--spec", nargs="+", required=True, help="spec YAML files or folders")
+    p.add_argument("--check", action="store_true", help="change nothing; exit 1 if any file is out of date")
+    args = p.parse_args(argv)
+    spec = load_specs(args.spec)
+    schema = json.loads(Path(__file__).with_name("spec.schema.json").read_text(encoding="utf-8"))
+    report = Report()
+    if check_schema(spec, schema, report):
+        lint(spec, report)
+    if report.errors:
+        report.print()
+        print("spec has errors; nothing synced")
+        sys.exit(1)
+    stale = failed = False
+    for f in map(Path, args.files):
+        text = f.read_text(encoding="utf-8")
+        new, updated, unknown = sync_text(text, spec)
+        for name in unknown:
+            print(f"{f}: unknown block '{name}' (known: {', '.join(sorted(BLOCKS))})")
+            failed = True
+        if updated:
+            stale = True
+            print(f"{f}: {'out of date' if args.check else 'updated'}: {', '.join(updated)}")
+            if not args.check:
+                f.write_text(new, encoding="utf-8")
+        else:
+            print(f"{f}: up to date")
+    sys.exit(1 if failed or (args.check and stale) else 0)
+
+
+def gherkin_main(argv):
+    p = argparse.ArgumentParser(prog="speclint gherkin", description="Generate Gherkin feature files (one per requirement area, one scenario per acceptance criterion).")
+    p.add_argument("specs", nargs="+", help="spec YAML files or folders")
+    p.add_argument("-o", "--output", required=True, metavar="DIR", help="folder to write into (a features/ folder is created inside)")
+    p.add_argument("--steps", nargs="?", const="pytest-bdd", choices=["pytest-bdd", "behave"], metavar="RUNNER",
+                   help="also write pending step stubs for a runner: pytest-bdd (default; test_acceptance.py and conftest.py) or behave (features/steps/steps.py)")
+    args = p.parse_args(argv)
+    spec = load_specs(args.specs)
+    schema = json.loads(Path(__file__).with_name("spec.schema.json").read_text(encoding="utf-8"))
+    report = Report()
+    if check_schema(spec, schema, report):
+        lint(spec, report)
+    if report.errors:
+        report.print()
+        print("spec has errors; nothing generated")
+        sys.exit(1)
+    out = Path(args.output)
+    feats = out / "features"
+    feats.mkdir(parents=True, exist_ok=True)
+    files = build_features(spec)
+    for name, text in files.items():
+        (feats / name).write_text(text, encoding="utf-8")
+    scenarios = sum(text.count("Scenario:") for text in files.values())
+    print(f"wrote {len(files)} feature file(s) with {scenarios} scenario(s) to {feats}/")
+    if args.steps == "pytest-bdd":
+        (out / "test_acceptance.py").write_text(build_steps(spec), encoding="utf-8")
+        (out / "conftest.py").write_text(build_conftest(files), encoding="utf-8")
+        print(f"wrote {out / 'test_acceptance.py'} and {out / 'conftest.py'}")
+    elif args.steps == "behave":
+        (feats / "steps").mkdir(exist_ok=True)
+        (feats / "steps" / "steps.py").write_text(build_behave_steps(spec), encoding="utf-8")
+        print(f"wrote {feats / 'steps' / 'steps.py'}")
+
+
+def import_main(argv):
+    p = argparse.ArgumentParser(prog="speclint import-openapi", description="Create a starting spec from an OpenAPI 3 file (YAML or JSON).")
+    p.add_argument("file", help="OpenAPI file")
+    p.add_argument("-o", "--output", required=True, metavar="DIR", help="folder for the spec files (must be empty or missing)")
+    p.add_argument("--name", help="system name (default: the title in the OpenAPI file)")
+    args = p.parse_args(argv)
+    doc = yaml.safe_load(Path(args.file).read_text(encoding="utf-8"))
+    if not isinstance(doc, dict) or "paths" not in doc:
+        print("error: that file does not look like an OpenAPI document (no 'paths')")
+        sys.exit(1)
+    out = Path(args.output)
+    if out.exists() and any(out.iterdir()):
+        print(f"error: {out} already exists and is not empty")
+        sys.exit(1)
+    files, notes = import_openapi(doc, args.name)
+    out.mkdir(parents=True, exist_ok=True)
+    for name, text in files.items():
+        (out / name).write_text(text, encoding="utf-8")
+        print(f"wrote {out / name}")
+    for note in sorted(set(notes)):
+        print(f"note: {note}")
+    print(f"\nnext: speclint {out}   (expect findings: the file has no requirements, tests or acceptance criteria)")
+
+
+def diff_main(argv):
+    p = argparse.ArgumentParser(prog="speclint diff", description="Show what changed between two versions of a spec.")
+    p.add_argument("old", help="old YAML file or folder")
+    p.add_argument("new", help="new YAML file or folder")
+    p.add_argument("--md", action="store_true", help="Markdown output")
+    p.add_argument("--exit-code", action="store_true", help="exit 1 if there are differences")
+    p.add_argument("--breaking", action="store_true", help="list changes that can break API clients; exit 1 if there are any")
+    args = p.parse_args(argv)
+    old, new = load_specs([args.old]), load_specs([args.new])
+    text = format_diff(old, new, md=args.md)
+    print(text, end="")
+    code = 1 if args.exit_code and text != "No differences.\n" else 0
+    if args.breaking:
+        items = breaking_changes(old, new)
+        print(("## Breaking changes" if args.md else "BREAKING CHANGES") + "\n")
+        for item in items:
+            print(f"{'- ' if args.md else '  '}{item}")
+        print(f"\n{len(items)} breaking change(s)" if items else "None.")
+        code = 1 if items else code
+    sys.exit(code)
+
+
+def schema_main(argv):
+    p = argparse.ArgumentParser(prog="speclint schema", description="Print the JSON Schema, optionally enriched with the IDs of a spec so YAML editors can complete them.")
+    p.add_argument("--for", dest="specs", nargs="+", metavar="SPEC", help="spec YAML files or folders to take IDs from")
+    p.add_argument("-o", "--output", help="write to a file instead of standard output")
+    args = p.parse_args(argv)
+    schema = json.loads(Path(__file__).with_name("spec.schema.json").read_text(encoding="utf-8"))
+    if args.specs:
+        schema = enriched_schema(schema, load_specs(args.specs))
+    text = json.dumps(schema, indent=2) + "\n"
+    if args.output:
+        Path(args.output).write_text(text, encoding="utf-8")
+        print(f"wrote {args.output}")
+    else:
+        print(text, end="")
+
+
+def init_main(argv):
+    p = argparse.ArgumentParser(prog="speclint init", description="Create a starter spec project that already passes the linter.")
+    p.add_argument("dir", help="folder to create the project in")
+    p.add_argument("--name", default="My System", help="system name (default: My System)")
+    args = p.parse_args(argv)
+    try:
+        created = init_project(args.dir, args.name)
+    except FileExistsError as exc:
+        print(f"error: {exc}")
+        sys.exit(1)
+    for rel in created:
+        print(f"created {Path(args.dir) / rel}")
+    print(f"\nnext: speclint {Path(args.dir) / 'spec'}")
+
+
+def watch_main(argv):
+    from .watch import watch
+    p = argparse.ArgumentParser(prog="speclint watch", description="Re-check the spec whenever a file changes (Ctrl-C to stop).")
+    p.add_argument("specs", nargs="+", help="YAML files or folders")
+    p.add_argument("--build", metavar="DIR", help="regenerate documents into DIR after each clean check")
+    p.add_argument("--sync", nargs="+", default=[], metavar="DOC", help="Markdown files to sync after each clean check")
+    p.add_argument("--interval", type=float, default=1.0, help="seconds between checks for changes (default 1)")
+    args = p.parse_args(argv)
+    print(f"watching {', '.join(args.specs)} (Ctrl-C to stop)")
+    try:
+        watch(args.specs, build_dir=args.build, sync_docs=args.sync, interval=args.interval)
+    except KeyboardInterrupt:
+        print("\nstopped")
+
+
+def _main():
+    if sys.argv[1:2] == ["diff"]:
+        return diff_main(sys.argv[2:])
+    if sys.argv[1:2] == ["sync"]:
+        return sync_main(sys.argv[2:])
+    commands = {"schema": schema_main, "init": init_main, "watch": watch_main,
+                "gherkin": gherkin_main, "import-openapi": import_main}
+    if sys.argv[1:2] and sys.argv[1] in commands:
+        return commands[sys.argv[1]](sys.argv[2:])
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("specs", nargs="+", help="YAML files or folders")
+    p.add_argument("--version", action="version", version=f"speclint {__version__}")
     p.add_argument("--schema", default=str(Path(__file__).with_name("spec.schema.json")))
     p.add_argument("--build", metavar="DIR", help="generate documents into DIR when there are no errors")
     p.add_argument("--strict", action="store_true", help="treat warnings as errors")
@@ -520,6 +843,19 @@ def main():
     if not failed and args.build:
         build(spec, args.build)
     sys.exit(1 if failed else 0)
+
+
+def main():
+    """Entry point. Exits quietly if the output pipe is closed early (for example `speclint ... | head`)."""
+    try:
+        _main()
+    except SpecError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        sys.exit(1)
 
 
 if __name__ == "__main__":

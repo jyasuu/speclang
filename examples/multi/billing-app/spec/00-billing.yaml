@@ -1,0 +1,41 @@
+# An application spec that reuses the platform spec from a sibling folder (or another repository checked out beside it).
+include:
+  - ../../platform
+
+spec:
+  name: Billing App
+  version: "0.1"
+  status: draft
+
+requirements:
+  - { id: FR-1, priority: M, area: invoices, text: "The system shall let an authenticated user list their invoices, newest first.", accepts: [AC-1] }
+  - { id: FR-2, priority: M, area: invoices, text: "The system shall let an Admin void an unpaid invoice.", accepts: [AC-2] }
+
+acceptance:
+  - { id: AC-1, covers: [FR-1], given: "a user with three invoices", when: "they request the invoice list", then: "the three invoices are returned newest first" }
+  - { id: AC-2, covers: [FR-2], given: "an unpaid invoice and an Admin", when: "the Admin voids it", then: "its status becomes void and it no longer counts as outstanding" }
+
+entities:
+  - name: Invoice
+    owner: billing
+    fields:
+      - { name: id, type: uuid, required: true }
+      - { name: number, type: string, required: true }
+      - { name: status, type: "unpaid | paid | void", required: true }
+      - { name: issued_at, type: timestamp, required: true }
+    states:
+      values: [unpaid, paid, void]
+      initial: unpaid
+      transitions:
+        - { from: unpaid, to: paid, event: pay, by: [Authenticated] }
+        - { from: unpaid, to: void, event: void, by: [Admin] }
+
+operations:
+  - { id: listInvoices, method: GET, path: /invoices, implements: [FR-1], permission: [Authenticated], errors: [], touches: { Invoice: R } }
+  - { id: voidInvoice, method: POST, path: "/invoices/{id}/void", implements: [FR-2], permission: [Admin], errors: [FORBIDDEN_ROLE], touches: { Invoice: U }, idempotent: true }
+
+tests:
+  - { id: T-1, level: integration, scope: "Invoice endpoints", target: "All acceptance criteria pass", covers: [AC-1, AC-2] }
+
+phases:
+  - { id: PH-1, name: First release, scope: "Invoice list and void", delivers: [FR-1, FR-2], exit: ["Delivered requirements pass"] }

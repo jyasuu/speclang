@@ -1,0 +1,10 @@
+# Shared platform spec: roles and error codes that every application in the company reuses.
+# It is not a complete spec on its own; applications pull it in with `include`.
+
+roles: [Anonymous, Authenticated, Admin]
+
+errors:
+  - { code: UNAUTHENTICATED, status: 401, meaning: "Missing or expired token", client: "Sign in again", global: true }
+  - { code: RATE_LIMITED, status: 429, meaning: "Too many requests", client: "Back off for the Retry-After period", global: true }
+  - { code: FORBIDDEN_ROLE, status: 403, meaning: "The caller's role does not allow this", client: "Show the read-only state" }
+  - { code: VALIDATION_FAILED, status: 422, meaning: "Field-level errors are listed in the errors array", client: "Show inline field messages", global: true }

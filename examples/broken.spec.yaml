@@ -55,6 +55,7 @@ operations:
     permission: [Editor]
     errors: []
     touches: { Task: U }
+    request: MissingType                                                  # R32 type does not exist
 
 errors:
   - { code: VALIDATION_FAILED, status: 422, meaning: Bad input, client: Show inline errors }
@@ -64,6 +65,7 @@ components:
   - name: ListScreen
     kind: screen
     uses: [createTask, deleteTask]                                        # R14 unknown operation
+    shows: [Task.title]                                                   # R34 no used operation returns it
     states: [default, loading]                                            # R13 missing empty, error, offline, no-permission
 
 # ---- v0.1 additions: flaws for the newer rules ----
@@ -89,3 +91,10 @@ phases:
 
 flows:
   - { id: UC-1, name: Open a list, steps: [Open], covers: [FR-42] }                                 # R26 unknown requirement
+
+# ---- v0.2 additions: flaws for the field-level rules ----
+types:
+  - { name: Thing, from: Ghost, fields: [{ name: size, type: strng }] }                              # R31 unknown entity and unresolvable type; R35 unused
+  - { name: Box, fields: [{ name: a, type: string }, { name: b, type: string }], constraints: [{ exactly_one: [a, c] }] }          # R37 constraint names unknown field c
+  - { name: Pair, fields: [{ name: a, type: string }, { name: b, type: string }], constraints: [{ exactly_one: [a, b] }], example: { a: x, b: y } }   # R36 example breaks its own constraint
+  - { name: Span, fields: [{ name: start, type: timestamp }, { name: end, type: timestamp }], checks: [{ left: begin, op: "<", right: end }] }   # R40 check names unknown field begin

@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Spec Language v0.1",
+  "title": "Spec Language v0.6",
   "description": "Structure of a system spec file. Cross-reference and completeness rules live in speclint.py.",
   "type": "object",
   "required": [
@@ -222,6 +222,20 @@
       "items": {
         "$ref": "#/definitions/revision"
       }
+    },
+    "types": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/type"
+      }
+    },
+    "include": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Other spec files, folders or globs to merge in, relative to this file"
     }
   },
   "definitions": {
@@ -542,6 +556,20 @@
           "type": "integer",
           "minimum": 200,
           "maximum": 299
+        },
+        "request": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Za-z0-9]*$"
+        },
+        "response": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Za-z0-9]*$"
+        },
+        "query": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/field"
+          }
         }
       }
     },
@@ -617,6 +645,13 @@
         "route": {
           "type": "string",
           "pattern": "^/"
+        },
+        "shows": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Za-z0-9]*\\.[a-z_][a-z0-9_]*$"
+          }
         }
       }
     },
@@ -1212,6 +1247,152 @@
         "change": {
           "type": "string",
           "minLength": 1
+        }
+      }
+    },
+    "field": {
+      "type": "object",
+      "required": [
+        "name",
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "note": {
+          "type": "string"
+        }
+      }
+    },
+    "type": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Za-z0-9]*$"
+        },
+        "from": {
+          "type": "string",
+          "description": "Entity whose fields this type starts from"
+        },
+        "only": {
+          "$ref": "#/definitions/stringList"
+        },
+        "omit": {
+          "$ref": "#/definitions/stringList"
+        },
+        "required": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/stringList"
+            }
+          ],
+          "description": "Exactly these fields are required"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/field"
+          }
+        },
+        "note": {
+          "type": "string"
+        },
+        "example": {
+          "type": "object",
+          "description": "Example payload; validated against the type"
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "minProperties": 1,
+            "properties": {
+              "exactly_one": {
+                "$ref": "#/definitions/stringList"
+              },
+              "at_least_one": {
+                "$ref": "#/definitions/stringList"
+              },
+              "at_most_one": {
+                "$ref": "#/definitions/stringList"
+              },
+              "requires": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/definitions/stringList"
+                }
+              }
+            }
+          }
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "left",
+              "op"
+            ],
+            "properties": {
+              "left": {
+                "type": "string",
+                "minLength": 1
+              },
+              "op": {
+                "enum": [
+                  "<",
+                  "<=",
+                  ">",
+                  ">=",
+                  "==",
+                  "!="
+                ]
+              },
+              "right": {
+                "type": "string",
+                "minLength": 1
+              },
+              "value": {
+                "type": [
+                  "number",
+                  "string",
+                  "boolean"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "oneOf": [
+              {
+                "required": [
+                  "right"
+                ]
+              },
+              {
+                "required": [
+                  "value"
+                ]
+              }
+            ]
+          }
         }
       }
     }
