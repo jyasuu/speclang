@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.8.0
+- **Robustness pass, found by fuzzing.** Mutating a good spec and good OpenAPI files in thousands of ways showed: `diff` and `schema --for` crashed on 566 of 7,500 runs when the spec was invalid; the importer crashed on 363 of 1,500 mutated files in 74 different places. All fixed:
+  - `diff` and `schema --for` validate the spec first and exit 2 with the first problems and their paths.
+  - The importer checks the OpenAPI shape before reading it and reports the file and the place; circular `$ref`s (an alias to itself, mutual aliases, `allOf` of itself, recursive objects) and 60-level `allOf` chains are handled; `x-implements` must name `FR-n` requirements; requirement IDs sort safely.
+  - After the fix: 4,500 mutated OpenAPI files either import or are rejected with a message, 0 crashes; 679 imported results were linted and rebuilt, 0 crashes; 2,250 diff/schema runs on mutated specs: 1,030 clean rejections, 0 crashes.
+- **`tests/test_robustness.py`:** eight deterministic mutation and edge-case tests (fixed seeds) keep these fixed. 85 tests in total.
+- **`pip install speclang[formats]`:** adds `rfc3339-validator` and `rfc3987` so `date-time` and `uri` formats are checked in examples.
+- Not in this release (planned): a lock file with commit ids and checksums for remote includes; ID namespacing.
+
+## 0.7.0
+- **Remote includes:** `include:` accepts `git+URL[@ref][#path=sub]` (a folder or file in a git repository at a tag, branch or commit) and `https://...yaml` URLs. Fetched content is cached (`SPECLANG_CACHE`); `SPECLANG_OFFLINE=1` forbids network access. Fetches are announced on stderr. Plain http only for localhost; URL includes must be `.yaml`/`.yml` and at most 2 MB.
+- **Containment:** a file fetched from a remote source may only include files from inside that source, and `#path=` may not leave the repository; either attempt stops with an error and reads nothing local.
+- **Duplicate IDs name their files** (R03): `duplicate id (defined in platform/00-platform.yaml, spec/01-extra.yaml)`. Namespacing was considered and not built: it needs a new ID syntax in every ID pattern and rewriting every reference.
+- **`pattern` and `format` on text fields** (entities and types): carried into the OpenAPI schema, checked against examples (including `email`, `date`, `ipv4`, `uuid`), read by the importer. New rule R41; 39 rules in total. The todo example now uses email formats and a one-time-code pattern.
+- Fixed during development: an invalid regular expression on a field crashed example validation with an uncaught `re.error` (same class of bug as the malformed check in 0.4); the example check now skips cleanly while R41 reports the pattern. Found by a test written for the feature.
+- Example data fix: the todo spec's entities now carry every field the prose data model lists (timestamps, `created_by`, `color`, `due_all_day`, `ip`, `user_agent`, `search_vector`), so the prose documents can be generated from it without losing information; the derived API types keep `search_vector` private.
+
 ## 0.6.0
 - **`include`:** a spec file can pull in other files, folders or globs, relative to itself (a shared platform spec, another repository checked out beside this one). Nested includes, each file read once, cycles harmless. Followed by lint, build, sync, gherkin, diff and watch. New example: `examples/multi/`.
 - **Importer reads constraints, checks and examples:** `oneOf` / `anyOf` / `dependentRequired` patterns become `constraints`; numeric limits (including OpenAPI 3.0 `exclusiveMinimum: true`) and `x-checks` become `checks`; `example` / `examples` become `example`. The lint then tests imported examples.

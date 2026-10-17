@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "speclang"
-version = "0.6.0"
+version = "0.8.0"
 description = "Write system specs as structured YAML, validate them, and generate traceability tables and an OpenAPI skeleton."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -12,7 +12,8 @@ dependencies = ["pyyaml>=6.0", "jsonschema>=4.0"]
 keywords = ["specification", "requirements", "traceability", "openapi", "linter"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "openapi-spec-validator>=0.7", "pytest-bdd>=7", "behave>=1.2.6"]
+formats = ["rfc3339-validator>=0.1", "rfc3987>=1.3"]
+dev = ["pytest>=7", "openapi-spec-validator>=0.7", "pytest-bdd>=7", "behave>=1.2.6", "rfc3339-validator>=0.1", "rfc3987>=1.3"]
 
 [project.scripts]
 speclint = "speclang.cli:main"

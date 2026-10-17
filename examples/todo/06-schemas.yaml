@@ -6,7 +6,7 @@ types:
   # --- Accounts and sessions
   - name: RegisterRequest
     fields:
-      - { name: email, type: string, required: true }
+      - { name: email, type: string, format: email, required: true }
       - { name: password, type: "string[12..200]", required: true }
       - { name: display_name, type: string }
       - { name: time_zone, type: string }
@@ -14,9 +14,9 @@ types:
     example: { email: ana@example.com, password: correct-horse-battery, display_name: Ana, time_zone: Asia/Taipei, marketing_consent: false }
   - name: LoginRequest
     fields:
-      - { name: email, type: string, required: true }
+      - { name: email, type: string, format: email, required: true }
       - { name: password, type: string, required: true }
-      - { name: mfa_code, type: "string[6..8]" }
+      - { name: mfa_code, type: string, pattern: "^[0-9]{6,8}$", note: "One-time code from the authenticator app" }
     example: { email: ana@example.com, password: correct-horse-battery }
   - name: OAuthRequest
     fields:
@@ -25,13 +25,13 @@ types:
   - name: VerifyEmailRequest
     fields: [{ name: token, type: string, required: true }]
   - name: PasswordResetRequest
-    fields: [{ name: email, type: string, required: true }]
+    fields: [{ name: email, type: string, format: email, required: true }]
   - name: PasswordResetConfirm
     fields:
       - { name: token, type: string, required: true }
       - { name: new_password, type: "string[12..200]", required: true }
   - name: MfaEnrollRequest
-    fields: [{ name: code, type: "string[6..8]", required: true }]
+    fields: [{ name: code, type: string, pattern: "^[0-9]{6,8}$", required: true }]
   - name: UserProfile
     from: User
     omit: [password_hash, mfa_secret_enc, deleted_at]
@@ -56,20 +56,20 @@ types:
       - { name: next_cursor, type: string }
   - name: ListCreate
     from: List
-    only: [name, sort_key]
+    only: [name, color, sort_key]
     required: [name]
   - name: ListPatch
     from: List
-    only: [name, archived_at, sort_key]
+    only: [name, color, archived_at, sort_key]
     required: []
 
     constraints:
-      - at_least_one: [name, archived_at, sort_key]
+      - at_least_one: [name, color, archived_at, sort_key]
     example: { name: Groceries }
   # --- Tasks, tags, reminders, attachments
   - name: Task
     from: Task
-    omit: [deleted_at]
+    omit: [deleted_at, search_vector]
     fields: [{ name: tags, type: "string[]" }]
   - name: TaskPage
     fields:
@@ -77,7 +77,7 @@ types:
       - { name: next_cursor, type: string }
   - name: TaskCreate
     from: Task
-    only: [id, list_id, parent_id, title, description, priority, due_at, recurrence_rule, sort_key, assignee_id]
+    only: [id, list_id, parent_id, title, description, priority, due_at, due_all_day, recurrence_rule, sort_key, assignee_id]
     required: [id, list_id, title]
     fields:
       - { name: tags, type: "string[]" }
@@ -93,11 +93,11 @@ types:
       - { left: reminder_at, op: "<=", right: due_at, message: "The reminder must not be after the due date" }
   - name: TaskPatch
     from: Task
-    only: [list_id, title, description, priority, due_at, recurrence_rule, sort_key, assignee_id]
+    only: [list_id, title, description, priority, due_at, due_all_day, recurrence_rule, sort_key, assignee_id]
     required: []
     fields: [{ name: tags, type: "string[]" }]
     constraints:
-      - at_least_one: [list_id, title, description, priority, due_at, recurrence_rule, sort_key, assignee_id, tags]
+      - at_least_one: [list_id, title, description, priority, due_at, due_all_day, recurrence_rule, sort_key, assignee_id, tags]
     example: { title: Renew passport, priority: high }
   - name: CompleteTaskRequest
     fields: [{ name: completed_at, type: timestamp, note: "Defaults to server time; must not be in the future" }]
@@ -146,7 +146,7 @@ types:
     omit: [invitation_token_hash, invited_by]
     fields:
       - { name: display_name, type: string }
-      - { name: email, type: string }
+      - { name: email, type: string, format: email }
       - { name: avatar_url, type: string }
   - name: MemberPage
     fields:
@@ -154,7 +154,7 @@ types:
       - { name: next_cursor, type: string }
   - name: InviteRequest
     fields:
-      - { name: email, type: string, required: true }
+      - { name: email, type: string, format: email, required: true }
       - { name: role, type: "owner | editor | viewer", required: true }
     example: { email: lee@example.com, role: editor }
   - name: MemberRolePatch

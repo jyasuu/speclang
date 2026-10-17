@@ -16,7 +16,9 @@ Usage:
   speclint diff old/ new/ --breaking            # also list changes that break API clients
 
 Multiple files are merged: list sections are concatenated, the first `spec` block wins.
-A file can pull in others with `include: [../shared-spec]` (paths relative to the file; folders and globs work).
+A file can pull in others with `include: [../shared-spec]` (paths relative to the file; folders and globs work),
+or from git: `include: [git+https://host/org/repo.git@v1.2#path=spec]`, or an https URL of a YAML file.
+SPECLANG_CACHE sets the cache folder; SPECLANG_OFFLINE=1 forbids network access.
 Exit code: 0 if no errors, 1 otherwise.
 """
 import argparse
@@ -30,11 +32,11 @@ from pathlib import Path
 import yaml
 from jsonschema import Draft7Validator
 
-from . import __version__
+from . import __version__, remote
 from .diff import breaking_changes, format_diff
 from .editor import enriched_schema, init_project
 from .gherkin import build_behave_steps, build_conftest, build_features, build_steps
-from .importer import import_openapi
+from .importer import ImportFileError, import_openapi
 from .openapi import gen_openapi
 from .typesys import lint_types
 
@@ -107,11 +109,21 @@ def _read_yaml(f):
     return data
 
 
+def _inside(path, root):
+    path, root = Path(path).resolve(), Path(root).resolve()
+    return path == root or root in path.parents
+
+
 def expand_files(paths):
-    """Every file that makes up a spec: the given files plus everything they `include`, each once."""
+    """Every file that makes up a spec: the given files plus everything they `include`, each once.
+
+    An include is a local path or glob (relative to the including file), `git+URL[@ref][#path=sub]`, or an https URL
+    of a YAML file. A file that was fetched from a remote source may only include files from inside that same
+    repository (or other remote sources), never your local files.
+    """
     seen, out = set(), []
 
-    def visit(f, via=None):
+    def visit(f, root=None):
         f = Path(f).resolve()
         if f in seen:
             return
@@ -121,24 +133,45 @@ def expand_files(paths):
         if not isinstance(includes, list):
             raise SpecError(f"{f}: 'include' must be a list")
         for inc in includes:
-            target = f.parent / inc
-            matches = sorted(f.parent.glob(inc)) if any(ch in inc for ch in "*?[") else [target]
-            matches = [m for m in matches if m.exists()]
+            if remote.is_remote(inc):
+                try:
+                    target, child_root = remote.fetch(inc)
+                except remote.RemoteError as exc:
+                    raise SpecError(f"{f}: {exc}") from exc
+                matches = [target]
+            else:
+                child_root = root
+                target = f.parent / inc
+                matches = sorted(f.parent.glob(inc)) if any(ch in inc for ch in "*?[") else [target]
+                matches = [m for m in matches if m.exists()]
+                if root is not None and any(not _inside(m, root) for m in matches):
+                    raise SpecError(f"{f}: include '{inc}' leaves the fetched repository; "
+                                    "a remote spec may only include files from inside itself")
             if not matches:
                 raise SpecError(f"{f}: include '{inc}' matches nothing")
             for m in matches:
                 for sub in (sorted(m.glob("*.yaml")) if m.is_dir() else [m]):
-                    visit(sub, f)
+                    visit(sub, child_root)
 
     for f in collect_files(paths):
         visit(f)
     return out
 
 
+class Spec(dict):
+    """The merged spec. `sources` maps (section, id) to the files that define it, to explain duplicate IDs."""
+
+    def __init__(self):
+        super().__init__()
+        self.sources = defaultdict(list)
+
+
 def load_specs(paths):
     """Merge every spec file (and its includes): lists are concatenated, the first `spec` block wins."""
-    merged = {}
+    id_keys = dict(DUP_CHECKS)
+    merged = Spec()
     for f in expand_files(paths):
+        label = f"{f.parent.name}/{f.name}"
         for key, value in _read_yaml(f).items():
             if key == "include":
                 continue
@@ -146,6 +179,10 @@ def load_specs(paths):
                 merged.setdefault("spec", value)
             elif isinstance(value, list):
                 merged.setdefault(key, []).extend(value)
+                if key in id_keys:
+                    for item in value:
+                        if isinstance(item, dict) and id_keys[key] in item:
+                            merged.sources[(key, item[id_keys[key]])].append(label)
             elif isinstance(value, dict):
                 merged.setdefault(key, {}).update(value)
             else:
@@ -184,7 +221,9 @@ def lint(spec, report):
         counts = Counter(i[key] for i in g(coll))
         for dup, n in counts.items():
             if n > 1:
-                report.add("ERROR", "R03", f"{coll}[{dup}]", "duplicate id")
+                where = getattr(spec, "sources", {}).get((coll, dup), [])
+                report.add("ERROR", "R03", f"{coll}[{dup}]",
+                           f"duplicate id (defined in {', '.join(where)})" if len(where) > 1 else "duplicate id")
 
     # R02 / R01 requirements and acceptance
     for a in acs:
@@ -736,7 +775,10 @@ def import_main(argv):
     if out.exists() and any(out.iterdir()):
         print(f"error: {out} already exists and is not empty")
         sys.exit(1)
-    files, notes = import_openapi(doc, args.name)
+    try:
+        files, notes = import_openapi(doc, args.name)
+    except ImportFileError as exc:
+        raise SpecError(f"{args.file} cannot be imported: {exc}") from exc
     out.mkdir(parents=True, exist_ok=True)
     for name, text in files.items():
         (out / name).write_text(text, encoding="utf-8")
@@ -744,6 +786,16 @@ def import_main(argv):
     for note in sorted(set(notes)):
         print(f"note: {note}")
     print(f"\nnext: speclint {out}   (expect findings: the file has no requirements, tests or acceptance criteria)")
+
+
+def require_valid(spec, label):
+    """Stop with a readable message if `spec` does not match the schema. For commands that read a spec without linting it."""
+    schema = json.loads(Path(__file__).with_name("spec.schema.json").read_text(encoding="utf-8"))
+    report = Report()
+    if not check_schema(spec, schema, report):
+        lines = [f"  {where}: {msg}" for (_lv, _r, where, msg) in report.items[:5]]
+        more = f"\n  ... and {len(report.items) - 5} more" if len(report.items) > 5 else ""
+        raise SpecError(f"{label} is not a valid spec:\n" + "\n".join(lines) + more + "\n(run speclint on it to see everything)")
 
 
 def diff_main(argv):
@@ -755,6 +807,8 @@ def diff_main(argv):
     p.add_argument("--breaking", action="store_true", help="list changes that can break API clients; exit 1 if there are any")
     args = p.parse_args(argv)
     old, new = load_specs([args.old]), load_specs([args.new])
+    require_valid(old, f"the old spec ({args.old})")
+    require_valid(new, f"the new spec ({args.new})")
     text = format_diff(old, new, md=args.md)
     print(text, end="")
     code = 1 if args.exit_code and text != "No differences.\n" else 0
@@ -775,7 +829,9 @@ def schema_main(argv):
     args = p.parse_args(argv)
     schema = json.loads(Path(__file__).with_name("spec.schema.json").read_text(encoding="utf-8"))
     if args.specs:
-        schema = enriched_schema(schema, load_specs(args.specs))
+        spec = load_specs(args.specs)
+        require_valid(spec, "the spec")
+        schema = enriched_schema(schema, spec)
     text = json.dumps(schema, indent=2) + "\n"
     if args.output:
         Path(args.output).write_text(text, encoding="utf-8")

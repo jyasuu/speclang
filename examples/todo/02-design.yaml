@@ -5,7 +5,7 @@ entities:
     owner: identity
     fields:
       - { name: id, type: uuid, required: true }
-      - { name: email, type: string, required: true }
+      - { name: email, type: string, format: email, required: true }
       - { name: email_verified_at, type: timestamp }
       - { name: password_hash, type: string }
       - { name: display_name, type: string }
@@ -13,6 +13,7 @@ entities:
       - { name: locale, type: string }
       - { name: mfa_secret_enc, type: bytes }
       - { name: marketing_consent_at, type: timestamp, note: "separate from account creation (FR-62)" }
+      - { name: created_at, type: timestamp, required: true }
       - { name: deleted_at, type: timestamp }
     retention: "Personal data erased within 30 days of an account deletion request; backups within 90 days."
 
@@ -31,6 +32,9 @@ entities:
       - { name: user_id, type: uuid, required: true }
       - { name: refresh_token_hash, type: string, required: true }
       - { name: device_label, type: string }
+      - { name: ip, type: string }
+      - { name: user_agent, type: string }
+      - { name: created_at, type: timestamp, required: true }
       - { name: last_seen_at, type: timestamp }
       - { name: revoked_at, type: timestamp }
 
@@ -40,9 +44,12 @@ entities:
       - { name: id, type: uuid, required: true }
       - { name: owner_id, type: uuid, required: true }
       - { name: name, type: string, required: true }
+      - { name: color, type: string }
       - { name: is_default, type: boolean, note: "the Inbox cannot be deleted" }
       - { name: sort_key, type: string }
       - { name: archived_at, type: timestamp }
+      - { name: created_at, type: timestamp, required: true }
+      - { name: updated_at, type: timestamp, required: true }
       - { name: version, type: integer, required: true }
       - { name: deleted_at, type: timestamp }
     retention: "Soft-deleted lists are purged after 30 days."
@@ -69,12 +76,17 @@ entities:
       - { name: status, type: "open | done", required: true }
       - { name: priority, type: "none | low | medium | high" }
       - { name: due_at, type: timestamp }
+      - { name: due_all_day, type: boolean, note: "true when the due date has no time; the user's time zone applies" }
       - { name: completed_at, type: timestamp }
       - { name: recurrence_rule, type: string }
       - { name: sort_key, type: string, note: "fractional index" }
       - { name: assignee_id, type: uuid }
+      - { name: created_by, type: uuid, required: true }
+      - { name: created_at, type: timestamp, required: true }
+      - { name: updated_at, type: timestamp, required: true }
       - { name: version, type: integer, required: true }
       - { name: deleted_at, type: timestamp, note: "tombstone for soft delete" }
+      - { name: search_vector, type: string, note: "derived full-text search vector; never exposed by the API" }
     states:
       values: [open, done, deleted]
       initial: open
@@ -117,6 +129,7 @@ entities:
       - { name: task_id, type: uuid, required: true }
       - { name: author_id, type: uuid, required: true }
       - { name: body, type: string, required: true }
+      - { name: created_at, type: timestamp, required: true }
       - { name: deleted_at, type: timestamp }
     retention: "Soft-deleted with the task; anonymized when the author deletes their account."
 
@@ -130,6 +143,7 @@ entities:
       - { name: size_bytes, type: bigint }
       - { name: content_type, type: string }
       - { name: scan_status, type: "pending | clean | quarantined", required: true }
+      - { name: created_at, type: timestamp, required: true }
 
   - name: ChangeLog
     owner: sync
@@ -141,6 +155,7 @@ entities:
       - { name: op, type: string, required: true }
       - { name: payload, type: json }
       - { name: actor_id, type: uuid }
+      - { name: created_at, type: timestamp, required: true }
     retention: "Append-only; compacted after 90 days."
 
   - name: AuditEvent
@@ -151,6 +166,7 @@ entities:
       - { name: action, type: string, required: true }
       - { name: target, type: string }
       - { name: ip, type: string }
+      - { name: created_at, type: timestamp, required: true }
     retention: "Kept 13 months."
 
   # Found missing from the prose data model when the operations were written (see v0.1 notes)

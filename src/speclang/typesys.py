@@ -28,6 +28,15 @@ PRIMS = {
 }
 
 
+KNOWN_FORMATS = {"email", "uri", "hostname", "ipv4", "ipv6", "date", "time", "duration", "uuid", "regex",
+                 "json-pointer", "date-time"}
+
+
+def _stringy(t):
+    """True for field types that hold text: string, string[1..500], markdown."""
+    return re.fullmatch(r"(string|markdown)(\[\d+\.\.\d+\])?", t.strip()) is not None
+
+
 def type_to_schema(t, type_names=()):
     """Return a JSON Schema fragment for a type string, or None if it cannot be resolved."""
     t = t.strip()
@@ -151,6 +160,10 @@ def type_schemas(spec):
         props, required = {}, []
         for f in fields:
             schema = type_to_schema(f["type"], names) or {}
+            if f.get("format") and _stringy(f["type"]):
+                schema = {**schema, "format": f["format"]}
+            if f.get("pattern") and _stringy(f["type"]):
+                schema = {**schema, "pattern": f["pattern"]}
             if f.get("note"):
                 schema = {**schema, "description": f["note"]}
             props[f["name"]] = schema
@@ -184,7 +197,8 @@ def type_schemas(spec):
 def validate_example(spec, name, example):
     """Messages for every way `example` fails the schema of type `name` (empty list if valid)."""
     root = {"$ref": f"#/components/schemas/{name}", "components": {"schemas": type_schemas(spec)}}
-    return sorted(e.message for e in Draft202012Validator(root).iter_errors(example))
+    validator = Draft202012Validator(root, format_checker=Draft202012Validator.FORMAT_CHECKER)
+    return sorted(e.message for e in validator.iter_errors(example))
 
 
 def reachable(spec, start):
@@ -235,6 +249,26 @@ def lint_types(spec, report):
             if type_to_schema(f["type"], type_names) is None:
                 report.add("ERROR", "R31", where, f"field '{f['name']}' has unresolvable type '{f['type']}'")
 
+    # R41 pattern and format on fields (types and entities)
+    def check_text_attrs(where, fields):
+        for f in fields:
+            if not (f.get("pattern") or f.get("format")):
+                continue
+            if not _stringy(f["type"]):
+                report.add("ERROR", "R41", where, f"field '{f['name']}': pattern and format apply to text fields, not '{f['type']}'")
+                continue
+            if f.get("pattern"):
+                try:
+                    re.compile(f["pattern"])
+                except re.error as exc:
+                    report.add("ERROR", "R41", where, f"field '{f['name']}': pattern is not a valid regular expression ({exc})")
+            if f.get("format") and f["format"] not in KNOWN_FORMATS:
+                report.add("WARN", "R41", where, f"field '{f['name']}': unknown format '{f['format']}' (known: {', '.join(sorted(KNOWN_FORMATS))})")
+    for e in spec.get("entities", []):
+        check_text_attrs(f"entities[{e['name']}]", e["fields"])
+    for t in types:
+        check_text_attrs(f"types[{t['name']}]", t.get("fields", []))
+
     # R36 examples validate, R37 constraints name real fields
     for t in types:
         where = f"types[{t['name']}]"
@@ -281,7 +315,11 @@ def lint_types(spec, report):
 
         if t.get("example") and not bad_checks and all(f["type"] and type_to_schema(f["type"], type_names) is not None
                                     for f in resolved.get(t["name"], [])):
-            for msg in validate_example(spec, t["name"], t["example"]) + check_violations(spec, t["name"], t["example"]):
+            try:
+                problems = validate_example(spec, t["name"], t["example"]) + check_violations(spec, t["name"], t["example"])
+            except re.error:
+                problems = []          # an invalid pattern is reported by R41; the example cannot be checked until it is fixed
+            for msg in problems:
                 report.add("ERROR", "R36", where, f"example is invalid: {msg}")
 
     # R32 / R33 operations

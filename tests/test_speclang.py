@@ -283,7 +283,7 @@ def test_sync_unknown_block_fails(tmp_path, monkeypatch):
 
 def test_version_flag(monkeypatch, capsys):
     assert _run(monkeypatch, "--version") == 0
-    assert "0.6.0" in capsys.readouterr().out
+    assert "0.8.0" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------- v0.4
@@ -775,3 +775,258 @@ def test_steps_flag_defaults_to_pytest_bdd_and_rejects_unknown_runners(tmp_path,
     assert _run(monkeypatch, "gherkin", TODO, "-o", tmp_path / "a", "--steps") == 0
     assert (tmp_path / "a" / "test_acceptance.py").exists() and not (tmp_path / "a" / "features" / "steps").exists()
     assert _run(monkeypatch, "gherkin", TODO, "-o", tmp_path / "b", "--steps", "cucumber") == 2
+
+
+# ---------------------------------------------------------------- v0.7
+
+import functools
+import http.server
+import threading
+
+from speclang import remote
+
+PLATFORM = ROOT / "examples" / "multi" / "platform" / "00-platform.yaml"
+APP = ROOT / "examples" / "multi" / "billing-app" / "spec" / "00-billing.yaml"
+needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+
+
+# ---- pattern and format
+
+def test_pattern_and_format_reach_the_openapi_schema():
+    spec, _ = run_lint([TODO])
+    schemas = typesys.type_schemas(spec)
+    assert schemas["RegisterRequest"]["properties"]["email"]["format"] == "email"
+    assert schemas["LoginRequest"]["properties"]["mfa_code"]["pattern"] == "^[0-9]{6,8}$"
+    assert schemas["UserProfile"]["properties"]["email"]["format"] == "email"           # inherited from the User entity
+
+
+def test_examples_are_checked_against_formats_and_patterns():
+    def bad_email(spec):
+        next(t for t in spec["types"] if t["name"] == "LoginRequest")["example"]["email"] = "not-an-email"
+    assert any("email" in m for (_lv, r, _w, m) in _mutate(bad_email).items if r == "R36")
+
+    def bad_code(spec):
+        t = next(t for t in spec["types"] if t["name"] == "LoginRequest")
+        t["example"]["mfa_code"] = "12ab"
+    assert "R36" in rules(_mutate(bad_code), "ERROR")
+
+
+def test_text_attribute_rules():
+    def edit(spec):
+        t = next(t for t in spec["types"] if t["name"] == "RegisterRequest")
+        t["fields"] = [dict(f) for f in t["fields"]]
+        for f in t["fields"]:
+            if f["name"] == "display_name":
+                f["format"] = "emial"                                      # unknown format: warning
+            if f["name"] == "time_zone":
+                f["pattern"] = "^[0-9{6,8$"                                # not a regular expression: error
+        upload = next(t for t in spec["types"] if t["name"] == "UploadUrlRequest")
+        for f in upload["fields"]:
+            if f["name"] == "size_bytes":
+                f["format"] = "email"                                      # a number cannot have a text format
+    report = _mutate(edit)
+    messages = [(lv, m) for (lv, r, _w, m) in report.items if r == "R41"]
+    assert ("WARN", "field 'display_name': unknown format 'emial'") in [(lv, m.split(" (known")[0]) for lv, m in messages]
+    assert any(lv == "ERROR" and "not a valid regular expression" in m for lv, m in messages)
+    assert any(lv == "ERROR" and "apply to text fields" in m for lv, m in messages)
+
+
+def test_importer_reads_formats_and_patterns_but_not_the_ones_it_already_models():
+    t, _ = _import_one({"type": "object", "properties": {
+        "mail": {"type": "string", "format": "email"},
+        "day": {"type": "string", "format": "date"},
+        "code": {"type": "string", "pattern": "^[A-Z]{3}$", "maxLength": 3},
+        "id": {"type": "string", "format": "uuid"},
+        "at": {"type": "string", "format": "date-time"}}})
+    fields = {f["name"]: f for f in t["fields"]}
+    assert fields["mail"]["format"] == "email" and fields["day"]["format"] == "date"
+    assert fields["code"]["pattern"] == "^[A-Z]{3}$" and fields["code"]["type"] == "string[0..3]"
+    assert fields["id"]["type"] == "uuid" and "format" not in fields["id"]                 # uuid is a type, not a format attribute
+    assert fields["at"]["type"] == "timestamp" and "format" not in fields["at"]
+
+
+# ---- duplicate IDs name their files
+
+def test_duplicate_id_report_names_both_files(tmp_path):
+    shutil.copytree(ROOT / "examples" / "multi", tmp_path / "multi")
+    spec_dir = tmp_path / "multi" / "billing-app" / "spec"
+    (spec_dir / "01-extra.yaml").write_text("errors:\n  - { code: FORBIDDEN_ROLE, status: 403, meaning: again, client: x }\n")
+    _spec, report = run_lint([spec_dir])
+    msg = next(m for (_lv, r, w, m) in report.items if r == "R03" and "FORBIDDEN_ROLE" in w)
+    assert "platform/00-platform.yaml" in msg and "spec/01-extra.yaml" in msg
+
+
+# ---- remote includes
+
+def _git(cwd, *args):
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=T", *args], cwd=cwd, check=True, capture_output=True)
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    """A local git repository holding the platform spec at tags v1.0.0 and v2.0.0 (v2 renames an error code)."""
+    monkeypatch.setenv("SPECLANG_CACHE", str(tmp_path / "cache"))
+    monkeypatch.delenv("SPECLANG_OFFLINE", raising=False)
+    r = tmp_path / "repo"
+    (r / "platform").mkdir(parents=True)
+    shutil.copy(PLATFORM, r / "platform" / "00-platform.yaml")
+    _git(r, "init", "-q", "-b", "main")
+    _git(r, "add", "-A")
+    _git(r, "commit", "-qm", "v1")
+    _git(r, "tag", "v1.0.0")
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=r, capture_output=True, text=True).stdout.strip()
+    (r / "platform" / "00-platform.yaml").write_text(PLATFORM.read_text().replace("FORBIDDEN_ROLE", "FORBIDDEN_ROLE_V2"))
+    _git(r, "commit", "-qam", "v2")
+    _git(r, "tag", "v2.0.0")
+    return {"url": f"file://{r}", "dir": r, "v1_sha": sha}
+
+
+def _app(tmp_path, include, name="app"):
+    d = tmp_path / name
+    d.mkdir(exist_ok=True)
+    text = APP.read_text().replace("  - ../../platform", f"  - {include}")
+    (d / "spec.yaml").write_text(text)
+    return d
+
+
+@needs_git
+def test_git_include_at_a_tag_and_a_commit(repo, tmp_path):
+    for ref in ("v1.0.0", repo["v1_sha"]):                                  # a tag, then a bare commit id
+        app = _app(tmp_path, f"git+{repo['url']}@{ref}#path=platform", name=f"app-{ref[:6]}")
+        spec, report = run_lint([app])
+        assert report.items == [], ref
+        assert "FORBIDDEN_ROLE" in {e["code"] for e in spec["errors"]}
+
+
+@needs_git
+def test_a_pinned_tag_gives_that_versions_content(repo, tmp_path):
+    app = _app(tmp_path, f"git+{repo['url']}@v2.0.0#path=platform")
+    spec, report = run_lint([app])
+    assert "FORBIDDEN_ROLE_V2" in {e["code"] for e in spec["errors"]}
+    assert any(r == "R08" and "voidInvoice" in w for (_lv, r, w, _m) in report.errors)   # v2 broke the reference
+
+
+@needs_git
+def test_remote_includes_are_cached(repo, tmp_path, capsys, monkeypatch):
+    app = _app(tmp_path, f"git+{repo['url']}@v1.0.0#path=platform")
+    cli.load_specs([app])
+    assert "fetching" in capsys.readouterr().err
+    calls = []
+    real = remote._git
+    monkeypatch.setattr(remote, "_git", lambda args: calls.append(args) or real(args))
+    cli.load_specs([app])
+    assert calls == [] and "fetching" not in capsys.readouterr().err            # second run: no git, no message
+
+
+@needs_git
+def test_offline_mode(repo, tmp_path, monkeypatch):
+    app = _app(tmp_path, f"git+{repo['url']}@v1.0.0#path=platform")
+    monkeypatch.setenv("SPECLANG_OFFLINE", "1")
+    with pytest.raises(cli.SpecError, match="SPECLANG_OFFLINE"):
+        cli.load_specs([app])                                                   # nothing cached yet
+    monkeypatch.delenv("SPECLANG_OFFLINE")
+    cli.load_specs([app])                                                       # populate the cache
+    monkeypatch.setenv("SPECLANG_OFFLINE", "1")
+    assert cli.load_specs([app])["roles"]                                       # cached: works offline
+
+
+@needs_git
+def test_a_path_fragment_cannot_leave_the_repository(repo, tmp_path):
+    app = _app(tmp_path, f"git+{repo['url']}@v1.0.0#path=../..")
+    with pytest.raises(cli.SpecError, match="leaves the repository"):
+        cli.load_specs([app])
+    missing = _app(tmp_path, f"git+{repo['url']}@v1.0.0#path=nope", name="app2")
+    with pytest.raises(cli.SpecError, match="does not exist"):
+        cli.load_specs([missing])
+
+
+@needs_git
+def test_a_remote_spec_cannot_include_local_files(repo, tmp_path):
+    """The security rule: files fetched from a remote source may only include files from inside that repository."""
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "s.yaml").write_text("roles: [LEAKED_LOCAL_ROLE]\n")
+    (repo["dir"] / "evil").mkdir()
+    (repo["dir"] / "evil" / "evil.yaml").write_text(f"include:\n  - {secret}\n")               # an absolute local path
+    _git(repo["dir"], "add", "-A")
+    _git(repo["dir"], "commit", "-qm", "evil")
+    _git(repo["dir"], "tag", "evil")
+    app = tmp_path / "evilapp"
+    app.mkdir()
+    (app / "s.yaml").write_text(f"spec: {{name: E, version: '1'}}\nrequirements: []\ninclude:\n  - git+{repo['url']}@evil#path=evil\n")
+    with pytest.raises(cli.SpecError, match="leaves the fetched repository"):
+        cli.load_specs([app])
+
+
+def test_parse_git_forms():
+    assert remote.parse_git("git+https://h/o/r.git@v1.2#path=spec") == ("https://h/o/r.git", "v1.2", "spec")
+    assert remote.parse_git("git+https://h/o/r.git") == ("https://h/o/r.git", None, None)
+    assert remote.parse_git("git+ssh://git@github.com/o/r.git@main") == ("ssh://git@github.com/o/r.git", "main", None)
+    assert remote.parse_git("git+git@github.com:o/r.git")[1] is None                       # user@host is not a ref
+    with pytest.raises(remote.RemoteError):
+        remote.parse_git("git+https://h/o/r.git#folder=spec")
+
+
+@pytest.fixture
+def web(tmp_path, monkeypatch):
+    monkeypatch.setenv("SPECLANG_CACHE", str(tmp_path / "cache"))
+    monkeypatch.delenv("SPECLANG_OFFLINE", raising=False)
+    root = tmp_path / "web"
+    root.mkdir()
+    shutil.copy(PLATFORM, root / "platform.yaml")
+    (root / "readme.txt").write_text("not yaml")
+
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=str(root)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+
+
+def test_url_include(web, tmp_path):
+    app = _app(tmp_path, f"{web}/platform.yaml")
+    spec, report = run_lint([app])
+    assert report.items == [] and "UNAUTHENTICATED" in {e["code"] for e in spec["errors"]}
+
+
+def test_url_include_rules(web, tmp_path):
+    with pytest.raises(cli.SpecError, match="404"):
+        cli.load_specs([_app(tmp_path, f"{web}/nope.yaml", name="a1")])
+    with pytest.raises(cli.SpecError, match="use https"):
+        cli.load_specs([_app(tmp_path, "http://example.com/platform.yaml", name="a2")])       # plain http only for localhost
+    with pytest.raises(cli.SpecError, match=r"\.yaml or \.yml"):
+        cli.load_specs([_app(tmp_path, f"{web}/readme.txt", name="a3")])
+
+
+def test_a_url_spec_cannot_include_local_files(web, tmp_path):
+    (tmp_path / "web" / "sneaky.yaml").write_text("include:\n  - /etc\n")
+    with pytest.raises(cli.SpecError, match="leaves the fetched repository"):
+        cli.load_specs([_app(tmp_path, f"{web}/sneaky.yaml", name="a4")])
+
+
+# ---------------------------------------------------------------- v0.8
+
+def _timestamp_text_spec(example):
+    return {"spec": {"name": "F", "version": "1"},
+            "requirements": [{"id": "FR-1", "priority": "S", "text": "The system shall record when things happen."}],
+            "types": [{"name": "Event", "fields": [{"name": "at", "type": "string", "format": "date-time"},
+                                                   {"name": "home", "type": "string", "format": "uri"}],
+                       "example": example}],
+            "operations": [{"id": "postEvent", "method": "POST", "path": "/events", "implements": ["FR-1"], "permission": ["Anonymous"],
+                            "errors": [], "touches": {}, "idempotent": True, "request": "Event", "success": 204}]}
+
+
+def test_date_time_and_uri_formats_are_checked_when_the_extras_are_installed():
+    """Needs `pip install speclang[formats]`; without it these two formats are accepted unchecked (documented)."""
+    pytest.importorskip("rfc3339_validator")
+    pytest.importorskip("rfc3987")
+    good = _timestamp_text_spec({"at": "2026-11-02T09:00:00Z", "home": "https://example.com/x"})
+    bad = _timestamp_text_spec({"at": "yesterday-ish", "home": "not a uri"})
+    for name, spec, expect_errors in (("good", good, 0), ("bad", bad, 2)):
+        report = cli.Report()
+        assert cli.check_schema(spec, json.loads(Path(cli.__file__).with_name("spec.schema.json").read_text()), report)
+        cli.lint(spec, report)
+        assert len([i for i in report.errors if i[1] == "R36"]) == expect_errors, name

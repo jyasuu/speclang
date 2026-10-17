@@ -2,11 +2,11 @@
 
 Write a system spec as **structured YAML**, check it, and generate the tables that are tedious to keep in sync by hand.
 
-- **Validate:** a JSON Schema plus 38 cross-reference and quality rules (every Must requirement has an acceptance criterion, every error an operation returns is catalogued, every screen declares its required states, and so on).
+- **Validate:** a JSON Schema plus 39 cross-reference and quality rules (every Must requirement has an acceptance criterion, every error an operation returns is catalogued, every screen declares its required states, and so on).
 - **Generate:** traceability matrix, acceptance criteria, error catalogue, endpoint summary, data model tables, interaction and permission matrices, notifications, analytics events, plans, threat model, risk register, delivery plan, state machine diagrams (Mermaid) and an **OpenAPI 3.1 document with real request and response bodies**.
 - **Link screens to fields:** components declare the fields they show, and the linter checks that an operation they use actually returns them.
 - **Generate tests:** `speclint gherkin specs/ -o tests/ --steps` turns every acceptance criterion into a Gherkin scenario with pending steps for `pytest-bdd` or `behave`.
-- **Share a spec:** `include: [../platform]` pulls other spec folders (a shared platform spec, another repository checked out beside this one) into a spec.
+- **Share a spec:** `include:` pulls in other spec folders: a local path, a git repository pinned to a tag or commit (`git+https://host/org/repo.git@v1.2.0#path=spec`) or an https URL, with a local cache and an offline mode.
 - **Adopt an existing API:** `speclint import-openapi api.yaml -o spec/` creates a starting spec from an OpenAPI file.
 - **Start fast:** `speclint init DIR` creates a starter project that already passes the linter, with editor settings, a CI job and a sample document.
 - **Edit with completion:** `speclint schema --for specs/` writes a JSON Schema listing your own requirement IDs, error codes, entities and so on, so YAML editors complete and check references as you type.
@@ -24,7 +24,8 @@ The YAML holds the *facts*. Rationale, diagrams and wireframes stay in your pros
 ```
 pip install .            # from this folder
 pip install speclang     # once published
-pip install ".[dev]"     # adds pytest and the OpenAPI validator
+pip install ".[dev]"     # adds pytest, the OpenAPI validator, pytest-bdd, behave and the format checkers
+pip install ".[formats]"  # checks date-time and uri formats in examples (see below)
 ```
 
 Requires Python 3.9+.
@@ -160,6 +161,16 @@ types:
 
 Operators: `<  <=  >  >=  ==  !=`. A check compares two fields (`right`) or a field with a fixed value (`value`). A numeric limit becomes standard JSON Schema (`exclusiveMinimum`, `maximum`, ...) in the OpenAPI file; a comparison between two fields cannot be expressed that way, so it is published as `x-checks` with the rule and your message. Examples are tested against both. Rule R40 fails when a check names a field the type does not have, compares things that cannot be compared (a timestamp with an integer), or uses a value of the wrong kind.
 
+### Patterns and formats on text fields (new in 0.7)
+
+```yaml
+fields:
+  - { name: email, type: string, format: email, required: true }
+  - { name: mfa_code, type: string, pattern: "^[0-9]{6,8}$" }
+```
+
+`format` (`email`, `uri`, `hostname`, `ipv4`, `ipv6`, `date`, `time`, `duration`, `regex`, ...) and `pattern` (a regular expression) go in the OpenAPI schema, and examples are checked against both. They work on `string` and `markdown` fields, on entities and on types, and a type that starts from an entity inherits them. Rule R41 fails for a pattern that is not a valid regular expression or a `format` or `pattern` on a number, and warns about a format name it does not know. The importer reads `format` and `pattern` from schemas (`uuid`, `date-time` and `byte` are already types).
+
 ## Editor support
 
 ```
@@ -249,9 +260,34 @@ Paths are relative to the file that contains them. An included file is merged ex
 
 Rules to know: IDs must be unique across everything merged (R03 reports a clash), and there is no namespacing. A shared catalogue holds entries a given application may not use, so R09 warns about them; mark errors that apply everywhere `global: true`, as the example does.
 
+### Remote includes (new in 0.7)
+
+```yaml
+include:
+  - ../../platform                                              # local folder, file or glob
+  - git+https://github.com/acme/platform-spec.git@v1.2.0#path=spec   # a folder inside a git repository
+  - git+file:///work/platform-spec@3f9c2ab                      # anything git can clone, at a tag, branch or commit
+  - https://specs.acme.example/errors.yaml                      # a single YAML file
+```
+
+- **Pin what you fetch.** Use a tag or a commit id. Fetched content is cached (default `~/.cache/speclang`, set `SPECLANG_CACHE` to change it) and reused on later runs, so a branch name stays at the commit it had when first fetched. A different tag gives different content, which is how a shared spec is versioned.
+- **Offline.** `SPECLANG_OFFLINE=1` forbids network access: cached includes work, anything else fails with a clear error. Use it in CI after a first fetch, or on a machine without network.
+- **What is fetched** is printed once to stderr (`speclint: fetching ...`). A git include needs the `git` command. Plain `http://` is accepted only for localhost; URL includes must end in `.yaml` or `.yml` and are limited to 2 MB.
+- **Containment.** A file fetched from a remote source may only include files from inside that same repository (or other remote sources). If it tries to include one of your local files, by a relative path, an absolute path or `#path=../..`, the run stops with an error and nothing local is read.
+- **Trust.** Remote content is read as data (YAML only, nothing is run), but it adds requirements, errors and rules to your spec and can include further remote sources. Review what you include and pin it.
+- **Duplicate IDs name their files.** If a shared spec and yours both define `FORBIDDEN_ROLE`, rule R03 reports `duplicate id (defined in platform/00-platform.yaml, spec/01-extra.yaml)`. There is no namespacing: IDs must be unique across everything merged. Namespacing would need a new ID syntax in every ID pattern and rewriting every reference, so it is not offered yet.
+
+## Robustness (new in 0.8)
+
+Malformed input produces a message, not a traceback. This is tested by mutation: the test suite breaks a good spec and a good OpenAPI file in many small ways (deleting keys, corrupting values, swapping and cross-wiring references, circular `$ref`s) and checks that nothing crashes.
+
+- `speclint diff` and `speclint schema --for` check the spec against the schema first and stop with `error: the new spec (...) is not a valid spec:` followed by the first problems and their paths.
+- `speclint import-openapi` checks the shape of the file before reading it and names the file and the place: `error: api.yaml cannot be imported: paths//x/get/parameters/0: 'in' is a required property`. Nothing is written when an import fails. Circular and very deeply nested schemas are handled.
+- `x-implements` on an operation must name requirements (`FR-n`).
+
 ## Exit codes and errors
 
-`0` clean, `1` the spec has errors (or warnings with `--strict`), `2` the files could not be read: invalid YAML (the line is named), a path that does not exist, a file that is not a mapping, a missing include. These print one `error:` line, never a traceback.
+`0` clean, `1` the spec has errors (or warnings with `--strict`), `2` the input could not be used: invalid YAML (the line is named), a path that does not exist, a file that is not a mapping, a missing include, a spec that does not match the schema (for `diff` and `schema`), an OpenAPI file that cannot be imported. These print one `error:` line, never a traceback.
 
 ## Test coverage
 
@@ -307,6 +343,7 @@ Output lists added, removed and changed items per section, then an impact line f
 | R36, R37 | E | Type examples are valid against their type and its constraints; constraints name real fields |
 | R38, R39 | W | Every acceptance criterion has a test; every Must requirement has a test path |
 | R40 | E | Value checks name real fields and compare things that can be compared |
+| R41 | E / W | Patterns are valid regular expressions; patterns and formats are only on text fields (E); unknown format names (W) |
 
 ## Authoring tips
 
@@ -327,8 +364,13 @@ pytest
 python -m build        # builds dist/*.whl and dist/*.tar.gz
 ```
 
-## Limits (v0.6)
+## Limits (v0.7)
 
+- Remote includes are fetched with `git` or plain HTTP(S) and are not signed or checksummed. Pinning a tag or commit is the only protection against a changed source, and a tag can be moved by whoever owns the repository: use a commit id when that matters.
+- There is no authentication for URL includes; private git repositories work only where `git` already has credentials, and prompts are disabled.
+- Format names are checked in examples as far as the installed packages allow: `email`, `date`, `ipv4`, `uuid` and similar always, and `date-time` and `uri` only after `pip install speclang[formats]` (otherwise they are accepted unchecked).
+- Remote includes have no lock file or checksum yet. Pin a commit id; a tag can be moved by the repository owner.
+- The mutation tests use fixed seeds and modest sizes to keep the suite quick, so they are a strong regression net, not proof that no malformed input can crash the tools.
 - `include` reads local paths only: there is no URL or git fetching, and no namespacing of IDs between included specs.
 - Imported constraints are recognised only in the JSON Schema patterns this tool writes; other `oneOf` and `anyOf` forms are simplified to `json` with a note. Numeric limits import as checks; `pattern`, `format: email` and string limits other than length are not imported.
 - Generated step files exist for `pytest-bdd` and `behave`. The feature files are plain Gherkin, so other runners (Cucumber, Godog) can use them, but you write the steps.

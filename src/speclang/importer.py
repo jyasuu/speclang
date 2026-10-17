@@ -6,13 +6,14 @@ types, success status, idempotency and If-Match headers); error responses become
 
 What is NOT in an OpenAPI file, so is created as a placeholder for you to rewrite: requirements (one placeholder per
 operation, priority S), entities (stubs, only when `x-touches` names them), acceptance criteria, tests, phases.
-Imported from schemas: `constraints` (the oneOf/anyOf/dependentRequired patterns this tool writes), `checks` (numeric limits
+Imported from schemas: string `format` and `pattern`, `constraints` (the oneOf/anyOf/dependentRequired patterns this tool writes), `checks` (numeric limits
 and `x-checks`) and `example`.
 """
 import ast
 import re
 
 import yaml
+from jsonschema import Draft7Validator
 
 METHODS = ["get", "post", "put", "patch", "delete"]
 CODE = re.compile(r"^[A-Z][A-Z0-9_]+$")
@@ -55,6 +56,83 @@ def parse_constraint(part):
     return None
 
 
+class ImportFileError(Exception):
+    """The OpenAPI file is not shaped the way the importer needs (reported with the path to the problem)."""
+
+
+def _schema_ref(): return {"$ref": "#/definitions/schema"}
+
+
+_SCHEMA_LIST = {"type": "array", "items": {"$ref": "#/definitions/schema"}}
+_NUM = {"type": "number"}
+OPENAPI_SHAPE = {
+    "type": "object",
+    "required": ["paths"],
+    "properties": {
+        "info": {"type": "object", "properties": {"title": {"type": ["string", "number"]}, "version": {"type": ["string", "number"]}}},
+        "security": {"type": "array"},
+        "paths": {"type": "object", "additionalProperties": {"$ref": "#/definitions/pathItem"}},
+        "components": {"type": "object", "properties": {
+            "schemas": {"type": "object", "additionalProperties": {"$ref": "#/definitions/schema"}}}},
+    },
+    "definitions": {
+        "schema": {
+            "type": "object",
+            "properties": {
+                "$ref": {"type": "string"}, "type": {"type": ["string", "array"]}, "enum": {"type": "array"},
+                "format": {"type": "string"}, "pattern": {"type": "string"}, "description": {"type": "string"},
+                "properties": {"type": "object", "additionalProperties": {"$ref": "#/definitions/schema"}},
+                "required": {"type": "array", "items": {"type": "string"}},
+                "items": {"$ref": "#/definitions/schema"}, "not": {"$ref": "#/definitions/schema"},
+                "allOf": _SCHEMA_LIST, "oneOf": _SCHEMA_LIST, "anyOf": _SCHEMA_LIST,
+                "minLength": {"type": "integer"}, "maxLength": {"type": "integer"},
+                "minimum": _NUM, "maximum": _NUM, "exclusiveMinimum": {"type": ["number", "boolean"]},
+                "exclusiveMaximum": {"type": ["number", "boolean"]},
+                "dependentRequired": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string"}}},
+                "x-checks": {"type": "array", "items": {"type": "object"}},
+            },
+        },
+        "parameters": {"type": "array", "items": {
+            "type": "object", "required": ["name", "in"],
+            "properties": {"name": {"type": "string"}, "in": {"type": "string"}, "required": {"type": "boolean"},
+                           "description": {"type": "string"}, "schema": {"$ref": "#/definitions/schema"}}}},
+        "content": {"type": "object", "additionalProperties": {
+            "type": "object", "properties": {"schema": {"$ref": "#/definitions/schema"}}}},
+        "operation": {
+            "type": "object",
+            "properties": {
+                "operationId": {"type": "string"}, "summary": {"type": "string"},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "parameters": {"$ref": "#/definitions/parameters"},
+                "requestBody": {"type": "object", "properties": {"content": {"$ref": "#/definitions/content"}}},
+                "responses": {"type": "object", "additionalProperties": {
+                    "type": "object", "properties": {"description": {"type": "string"}, "content": {"$ref": "#/definitions/content"}}}},
+                "security": {"type": "array"},
+                "x-permission": {"type": "array", "items": {"type": "string"}},
+                "x-touches": {"type": "object", "additionalProperties": {"type": "string"}},
+                "x-implements": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^FR-[0-9]+$"}},
+            },
+        },
+        "pathItem": {
+            "type": "object",
+            "properties": {"parameters": {"$ref": "#/definitions/parameters"},
+                           **{m: {"$ref": "#/definitions/operation"} for m in METHODS}},
+        },
+    },
+}
+
+
+def check_shape(doc):
+    """Raise ImportFileError listing (up to five) places where the document is not shaped as the importer needs."""
+    problems = []
+    for e in sorted(Draft7Validator(OPENAPI_SHAPE).iter_errors(doc), key=lambda e: list(map(str, e.absolute_path))):
+        where = "/".join(str(p) for p in e.absolute_path) or "(top level)"
+        problems.append(f"{where}: {e.message[:120]}")
+    if problems:
+        extra = f" ... and {len(problems) - 5} more" if len(problems) > 5 else ""
+        raise ImportFileError("; ".join(problems[:5]) + extra)
+
+
 def _type_name(raw, taken):
     name = re.sub(r"[^A-Za-z0-9]", "", raw) or "Type"
     name = name[0].upper() + name[1:]
@@ -95,18 +173,24 @@ class Importer:
 
     # ------------------------------------------------------------ field types
     def resolve(self, schema):
+        seen = set()
         while "$ref" in schema:
-            schema = self.schemas.get(schema["$ref"].rsplit("/", 1)[-1], {})
+            name = schema["$ref"].rsplit("/", 1)[-1]
+            if name in seen:                      # a schema that refers to itself: nothing to follow
+                self.notes.append(f"schema {name} refers to itself and was treated as json")
+                return {}
+            seen.add(name)
+            schema = self.schemas.get(name, {})
         return schema
 
-    def flatten(self, schema):
+    def flatten(self, schema, depth=0):
         """Follow $ref and merge `allOf` of object schemas into one object schema (the usual 'extends' pattern)."""
         schema = self.resolve(schema)
-        if "allOf" not in schema:
+        if "allOf" not in schema or depth > 20:
             return schema
         merged = {"type": "object", "properties": {}, "required": []}
         for part in schema["allOf"]:
-            part = self.flatten(part)
+            part = self.flatten(part, depth + 1)
             if not self.is_object(part):
                 return schema
             merged["properties"].update(part.get("properties") or {})
@@ -117,15 +201,17 @@ class Importer:
             merged["description"] = schema["description"]
         return merged
 
-    def field_type(self, schema, where):
+    def field_type(self, schema, where, depth=0):
         """(type string, note or None) in the spec's type language."""
+        if depth > 20:
+            return "json", "nesting too deep to import"
         if "$ref" in schema:
             name = schema["$ref"].rsplit("/", 1)[-1]
             if name in self.type_names:
                 return self.type_names[name], None
-            return self.field_type(self.schemas.get(name, {}), where)
+            return self.field_type(self.schemas.get(name, {}), where, depth + 1)
         if "allOf" in schema and len(schema["allOf"]) == 1 and len(schema) <= 2:
-            return self.field_type(schema["allOf"][0], where)
+            return self.field_type(schema["allOf"][0], where, depth + 1)
         for key in ("oneOf", "anyOf", "allOf"):
             if key in schema:
                 self.notes.append(f"{where}: {key} simplified to json")
@@ -134,7 +220,7 @@ class Importer:
         if "enum" in schema and all(isinstance(v, str) for v in schema["enum"]):
             return " | ".join(schema["enum"]), None
         if t == "array":
-            inner, _ = self.field_type(schema.get("items", {}), where)
+            inner, _ = self.field_type(schema.get("items", {}), where, depth + 1)
             if "|" in inner:                      # arrays of enums are not expressible; use string[]
                 inner = "string"
             return f"{inner}[]", None
@@ -163,6 +249,13 @@ class Importer:
         for fname, fschema in (schema.get("properties") or {}).items():
             ftype, note = self.field_type(fschema, f"{name}.{fname}")
             f = {"name": fname, "type": ftype}
+            resolved = self.resolve(fschema)
+            if resolved.get("type") == "string" and ftype.split("[")[0] == "string":
+                fmt = resolved.get("format")
+                if fmt and fmt not in ("uuid", "date-time", "byte"):
+                    f["format"] = fmt
+                if resolved.get("pattern"):
+                    f["pattern"] = resolved["pattern"]
             if fname in required:
                 f["required"] = True
             desc = note or fschema.get("description")
@@ -385,7 +478,7 @@ class Importer:
                 "roles": roles}
         return {
             "00-meta.yaml": meta,
-            "10-requirements.yaml": {"requirements": sorted(reqs, key=lambda r: int(r["id"].split("-")[1]))},
+            "10-requirements.yaml": {"requirements": sorted(reqs, key=lambda r: [int(p) if p.isdigit() else p for p in re.split(r"(\d+)", r["id"])])},
             "20-api.yaml": {**({"entities": list(entities.values())} if entities else {}),
                             "errors": sorted(errors.values(), key=lambda e: (e["status"], e["code"])),
                             "operations": ops},
@@ -394,7 +487,10 @@ class Importer:
 
 
 def import_openapi(doc, name=None):
-    """Return ({filename: yaml text}, notes) for the spec files that describe `doc`."""
+    """Return ({filename: yaml text}, notes) for the spec files that describe `doc`. Raises ImportFileError if malformed."""
+    if not isinstance(doc, dict):
+        raise ImportFileError("the file must contain an OpenAPI document (a mapping)")
+    check_shape(doc)
     importer = Importer(doc)
     parts = importer.run(name)
     header = ("# Imported from an OpenAPI document by speclint import-openapi.\n"
